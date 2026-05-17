@@ -4,6 +4,13 @@ import { DB_PATH, PARKS } from "@/lib/config";
 import type { LandGroup, ParkDetailResponse, ParkHoursEntry, ShowTimeItem } from "@/lib/types";
 
 let db: DatabaseSync | null = null;
+const HIDDEN_RIDE_NAMES = [
+  "Maharajah Jungle Trek",
+  "Beauty and the Beast Sing-Along",
+  "Impressions de France",
+  "Reflections of China",
+  "The American Adventure"
+];
 
 function connect() {
   if (!existsSync(DB_PATH)) {
@@ -178,11 +185,13 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
               ORDER BY datetime(s2.captured_at) DESC
               LIMIT 1
             )
-          WHERE a.park_slug = ? AND a.category = 'ride'
+          WHERE a.park_slug = ?
+            AND a.category = 'ride'
+            AND a.name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
           ORDER BY areaSort, a.name
         `
       )
-      .all(park.slug, park.slug, park.slug, park.slug) as Array<{
+      .all(park.slug, park.slug, park.slug, park.slug, ...HIDDEN_RIDE_NAMES) as Array<{
         id: string;
         name: string;
         areaName: string;

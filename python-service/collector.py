@@ -18,6 +18,13 @@ from zoneinfo import ZoneInfo
 DB_PATH = Path(__file__).resolve().parent / "data" / "disney_wait_times.db"
 EASTERN = ZoneInfo("America/New_York")
 LOGGER = logging.getLogger("dwtmobile.collector")
+NON_RIDE_ATTRACTION_NAMES = {
+    "maharajah jungle trek",
+    "beauty and the beast sing-along",
+    "impressions de france",
+    "reflections of china",
+    "the american adventure",
+}
 
 
 @dataclass(frozen=True)
@@ -484,6 +491,8 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
             last_updated = item.get("lastUpdated") or queue_match.get("last_updated")
 
             if entity_type == "ATTRACTION":
+                if name.lower() in NON_RIDE_ATTRACTION_NAMES:
+                    continue
                 standby = (item.get("queue") or {}).get("STANDBY") or {}
                 wait_time = standby.get("waitTime")
                 if wait_time is None:

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { DB_PATH, PARKS } from "@/lib/config";
 import { getStorageStats, getTrafficStats, getUsageStats } from "@/lib/stats";
@@ -18,6 +19,12 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function healthTone(ok: boolean) {
   return ok ? "healthy" : "warning";
 }
@@ -26,6 +33,8 @@ export default function StatsPage() {
   const traffic = getTrafficStats();
   const usage = getUsageStats();
   const storage = existsSync(DB_PATH) ? getStorageStats() : null;
+  const gitSha = execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
+  const buildTime = new Date().toISOString();
   const allParksReporting = storage ? storage.health.parksWithData === storage.health.expectedParks : false;
   const dataFresh = storage ? (storage.health.latestSnapshotAgeMinutes ?? Number.MAX_SAFE_INTEGER) <= 20 : false;
   const noCollectorErrors = storage ? storage.health.parksWithErrors === 0 : false;
@@ -102,6 +111,26 @@ export default function StatsPage() {
 
       <section className="noc-columns">
         <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Collector SLA</h2><span>Expected vs observed</span></div>
+          <div className="mini-metrics">
+            <span>Expected cycles / 24h <strong>{storage?.sla.expectedCyclesLast24h ?? 216}</strong></span>
+            <span>Completed cycles / 24h <strong>{storage?.sla.completedCyclesLast24h ?? 0}</strong></span>
+            <span>Completion rate <strong>{storage ? `${Math.round((storage.sla.completedCyclesLast24h / storage.sla.expectedCyclesLast24h) * 100)}%` : "0%"}</strong></span>
+          </div>
+        </article>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Deployment</h2><span>Current server context</span></div>
+          <div className="mini-metrics">
+            <span>Git SHA <strong>{gitSha}</strong></span>
+            <span>Build time <strong>{formatDate(buildTime)}</strong></span>
+            <span>DB footprint <strong>{formatBytes(storage?.storageFootprint.databaseBytes ?? 0)}</strong></span>
+            <span>Schema tables <strong>10</strong></span>
+          </div>
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
           <div className="noc-panel-head"><h2>Polling Timeline</h2><span>Last 24 hours</span></div>
           <div className="timeline-list">
             {storage?.pollingTimeline.length ? storage.pollingTimeline.map((item) => (
@@ -144,6 +173,33 @@ export default function StatsPage() {
 
       <section className="noc-columns">
         <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Source Latency Trend</h2><span>Last 24 hours</span></div>
+          <div className="source-list">
+            {storage?.sourceLatencyTrend.length ? storage.sourceLatencyTrend.map((source) => (
+              <div key={source.source}>
+                <strong>{source.source}</strong>
+                <span>{source.checks} checks</span>
+                <em>{source.avgDurationMs ?? 0} ms avg</em>
+              </div>
+            )) : <p>No latency data yet.</p>}
+          </div>
+        </article>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Error History</h2><span>Last 7 days</span></div>
+          <div className="source-list">
+            {storage?.recentErrors.length ? storage.recentErrors.map((entry) => (
+              <div key={`${entry.source}-${entry.error}`}>
+                <strong>{entry.source}</strong>
+                <span>{entry.occurrences}x, last {formatDate(entry.lastSeenAt)}</span>
+                <em className="warning">Error</em>
+              </div>
+            )) : <p>No recent source errors.</p>}
+          </div>
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
           <div className="noc-panel-head"><h2>Top Movers Today</h2></div>
           <div className="source-list">
             {storage?.topMovers.map((ride) => (
@@ -152,28 +208,67 @@ export default function StatsPage() {
           </div>
         </article>
         <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Data Anomalies</h2></div>
+          <div className="mini-metrics">
+            <span>Flatline rides <strong>{storage?.anomalies.flatlineRides.length ?? 0}</strong></span>
+            <span>Parks with low snapshot coverage <strong>{storage?.anomalies.attractionCoverageDrops.length ?? 0}</strong></span>
+          </div>
+          {storage && storage.anomalies.flatlineRides.length > 0 && (
+            <div className="metadata-list">
+              {storage.anomalies.flatlineRides.map((ride) => (
+                <span key={`${ride.parkName}-${ride.name}`}>
+                  <strong>{ride.name}</strong>
+                  {ride.parkName} flat for {ride.samples} samples
+                </span>
+              ))}
+            </div>
+          )}
+          {storage && storage.anomalies.attractionCoverageDrops.length > 0 && (
+            <div className="metadata-list">
+              {storage.anomalies.attractionCoverageDrops.map((park) => (
+                <span key={park.slug}>
+                  <strong>{park.shortName}</strong>
+                  low snapshot coverage vs attraction count
+                </span>
+              ))}
+            </div>
+          )}
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
           <div className="noc-panel-head"><h2>Coverage Quality</h2></div>
           <div className="mini-metrics">
             <span>Missing land <strong>{storage?.coverageQuality.ridesMissingLand ?? 0}</strong></span>
             <span>Null waits <strong>{storage?.coverageQuality.ridesWithNullWait ?? 0}</strong></span>
             <span>No recent data <strong>{storage?.coverageQuality.ridesWithoutRecentData ?? 0}</strong></span>
           </div>
+          {storage && storage.ridesMissingLandMetadata.length > 0 && (
+            <div className="metadata-list">
+              {storage.ridesMissingLandMetadata.map((ride) => (
+                <span key={ride.id}>
+                  <strong>{ride.name}</strong>
+                  {ride.parkName}
+                </span>
+              ))}
+            </div>
+          )}
         </article>
-      </section>
-
-      <section className="noc-panel">
-        <div className="noc-panel-head"><h2>Freshness Heatmap</h2><span>Snapshots in last 12 hours</span></div>
-        <div className="heatmap-grid">
-          {PARKS.map((park) => {
-            const rows = storage?.freshnessHeatmap.filter((item) => item.parkSlug === park.slug) ?? [];
-            return (
-              <article key={park.slug}>
-                <strong>{park.shortName}</strong>
-                <div>{rows.map((row) => <span key={row.hour} title={`${row.hour}: ${row.snapshots}`}>{row.snapshots}</span>)}</div>
-              </article>
-            );
-          })}
-        </div>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Freshness Heatmap</h2><span>Snapshots in last 12 hours</span></div>
+          <div className="heatmap-grid">
+            {PARKS.map((park) => {
+              const rows = storage?.freshnessHeatmap.filter((item) => item.parkSlug === park.slug) ?? [];
+              return (
+                <article key={park.slug}>
+                  <strong>{park.shortName}</strong>
+                  <div>{rows.map((row) => <span key={row.hour} title={`${row.hour}: ${row.snapshots}`}>{row.snapshots}</span>)}</div>
+                </article>
+              );
+            })}
+          </div>
+        </article>
       </section>
 
       <section className="noc-columns">

@@ -1,9 +1,16 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DB_PATH, PARKS } from "@/lib/config";
 
 const METRICS_DB_PATH = join(dirname(DB_PATH), "app_metrics.db");
+const HIDDEN_RIDE_NAMES = [
+  "Maharajah Jungle Trek",
+  "Beauty and the Beast Sing-Along",
+  "Impressions de France",
+  "Reflections of China",
+  "The American Adventure"
+];
 
 let metricsDb: DatabaseSync | null = null;
 
@@ -115,19 +122,20 @@ export function getUsageStats() {
 export function getStorageStats() {
   const database = new DatabaseSync(DB_PATH, { open: true, readOnly: true });
   try {
+    const dbStats = statSync(DB_PATH);
     const totals = database
       .prepare(
         `
           SELECT
             (SELECT COUNT(*) FROM wait_snapshots) AS waitSnapshots,
-            (SELECT COUNT(*) FROM attractions) AS attractions,
+            (SELECT COUNT(*) FROM attractions WHERE name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})) AS attractions,
             (SELECT COUNT(*) FROM showtimes) AS showtimes,
             (SELECT COUNT(*) FROM park_schedules) AS scheduleRows,
             (SELECT MIN(captured_at) FROM wait_snapshots) AS firstSnapshotAt,
             (SELECT MAX(captured_at) FROM wait_snapshots) AS lastSnapshotAt
         `
       )
-      .get() as {
+      .get(...HIDDEN_RIDE_NAMES) as {
       waitSnapshots: number;
       attractions: number;
       showtimes: number;
@@ -151,6 +159,7 @@ export function getStorageStats() {
           LEFT JOIN (
             SELECT park_slug, COUNT(*) AS attractions
             FROM attractions
+            WHERE name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
             GROUP BY park_slug
           ) a ON a.park_slug = p.slug
           LEFT JOIN (
@@ -162,7 +171,7 @@ export function getStorageStats() {
           ORDER BY p.short_name
         `
       )
-      .all() as Array<{
+      .all(...HIDDEN_RIDE_NAMES) as Array<{
       slug: string;
       shortName: string;
       attractions: number;
@@ -292,13 +301,46 @@ export function getStorageStats() {
             ) s2 ON s1.attraction_id = s2.attraction_id AND s1.captured_at = s2.captured_at
           ) latest ON latest.attraction_id = a.id
           WHERE a.category = 'ride'
+            AND a.name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
+            AND COALESCE(latest.status, '') <> 'REFURBISHMENT'
         `
       )
-      .get() as {
+      .get(...HIDDEN_RIDE_NAMES) as {
       ridesMissingLand: number;
       ridesWithNullWait: number;
       ridesWithoutRecentData: number;
     };
+
+    const ridesMissingLandMetadata = database
+      .prepare(
+        `
+          SELECT
+            a.id,
+            a.name,
+            p.short_name AS parkName
+          FROM attractions a
+          JOIN parks p ON p.slug = a.park_slug
+          LEFT JOIN (
+            SELECT s1.*
+            FROM wait_snapshots s1
+            JOIN (
+              SELECT attraction_id, MAX(captured_at) AS captured_at
+              FROM wait_snapshots
+              GROUP BY attraction_id
+            ) s2 ON s1.attraction_id = s2.attraction_id AND s1.captured_at = s2.captured_at
+          ) latest ON latest.attraction_id = a.id
+          WHERE a.category = 'ride'
+            AND a.area_name IS NULL
+            AND a.name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
+            AND COALESCE(latest.status, '') <> 'REFURBISHMENT'
+          ORDER BY p.short_name, a.name
+        `
+      )
+      .all(...HIDDEN_RIDE_NAMES) as Array<{
+      id: string;
+      name: string;
+      parkName: string;
+    }>;
 
     const runtime = database
       .prepare(
@@ -316,6 +358,87 @@ export function getStorageStats() {
       averageCycleSeconds: number | null;
       lastCycleSeconds: number | null;
     };
+
+    const flatlineRides = database
+      .prepare(
+        `
+          SELECT
+            a.name,
+            p.short_name AS parkName,
+            COUNT(*) AS samples,
+            MIN(ws.wait_time) AS minWait,
+            MAX(ws.wait_time) AS maxWait
+          FROM wait_snapshots ws
+          JOIN attractions a ON a.id = ws.attraction_id
+          JOIN parks p ON p.slug = ws.park_slug
+          WHERE ws.wait_time IS NOT NULL
+            AND ws.is_open = 1
+            AND datetime(ws.captured_at) >= datetime('now', '-3 hours')
+            AND a.category = 'ride'
+            AND a.name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
+          GROUP BY ws.attraction_id
+          HAVING COUNT(*) >= 6 AND MIN(ws.wait_time) = MAX(ws.wait_time)
+          ORDER BY samples DESC, a.name
+          LIMIT 5
+        `
+      )
+      .all(...HIDDEN_RIDE_NAMES) as Array<{
+      name: string;
+      parkName: string;
+      samples: number;
+      minWait: number;
+      maxWait: number;
+    }>;
+
+    const attractionCoverageDrops = parks.filter(
+      (park) => park.attractions > 0 && park.waitSnapshots / park.attractions < 5
+    );
+
+    const sourceLatencyTrend = database
+      .prepare(
+        `
+          SELECT
+            source,
+            ROUND(AVG(duration_ms)) AS avgDurationMs,
+            MAX(duration_ms) AS maxDurationMs,
+            COUNT(*) AS checks
+          FROM source_checks
+          WHERE datetime(checked_at) >= datetime('now', '-24 hours')
+          GROUP BY source
+          ORDER BY source
+        `
+      )
+      .all() as Array<{
+      source: string;
+      avgDurationMs: number | null;
+      maxDurationMs: number | null;
+      checks: number;
+    }>;
+
+    const recentErrors = database
+      .prepare(
+        `
+          SELECT
+            source,
+            error,
+            MIN(checked_at) AS firstSeenAt,
+            MAX(checked_at) AS lastSeenAt,
+            COUNT(*) AS occurrences
+          FROM source_checks
+          WHERE success = 0
+            AND datetime(checked_at) >= datetime('now', '-7 days')
+          GROUP BY source, error
+          ORDER BY lastSeenAt DESC
+          LIMIT 5
+        `
+      )
+      .all() as Array<{
+      source: string;
+      error: string;
+      firstSeenAt: string;
+      lastSeenAt: string;
+      occurrences: number;
+    }>;
 
     const distinctSnapshotDays = database
       .prepare("SELECT COUNT(DISTINCT date(captured_at, 'localtime')) AS days FROM wait_snapshots")
@@ -341,7 +464,21 @@ export function getStorageStats() {
       freshnessHeatmap,
       topMovers,
       coverageQuality,
+      ridesMissingLandMetadata,
       runtime,
+      anomalies: {
+        flatlineRides,
+        attractionCoverageDrops
+      },
+      sourceLatencyTrend,
+      recentErrors,
+      storageFootprint: {
+        databaseBytes: dbStats.size
+      },
+      sla: {
+        expectedCyclesLast24h: 216,
+        completedCyclesLast24h: runtime.cyclesLast24h
+      },
       retention: {
         daysCovered: distinctSnapshotDays.days,
         daysUntilFullWindow: Math.max(0, 60 - distinctSnapshotDays.days)

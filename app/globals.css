@@ -1136,6 +1136,26 @@ details summary {
   color: var(--ink);
 }
 
+.metadata-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.metadata-list span {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.metadata-list strong {
+  color: var(--ink);
+}
+
 .heatmap-grid {
   display: grid;
   gap: 10px;
