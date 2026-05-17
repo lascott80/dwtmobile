@@ -8,3 +8,5 @@ dist
 tsconfig.tsbuildinfo
 python-service/data/*.db
 python-service/data/*.sqlite
+python-service/data/*.db-shm
+python-service/data/*.db-wal
