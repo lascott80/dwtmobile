@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { LandGroup, ParkDetailResponse, ParkHoursEntry, ParkMetaResponse, RideItem } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { LandGroup, ParkDetailResponse, ParkMetaResponse, RideItem } from "@/lib/types";
 
 const FAVORITES_KEY = "dwtmobile:favorites";
 type RideSort = "land" | "wait-desc" | "wait-asc" | "alpha" | "favorites";
+
+function pinFavoritesFirst(rides: RideItem[], favorites: string[]) {
+  const favoriteSet = new Set(favorites);
+  return [...rides].sort((a, b) => {
+    const favoriteDiff = Number(favoriteSet.has(b.id)) - Number(favoriteSet.has(a.id));
+    if (favoriteDiff !== 0) return favoriteDiff;
+    return a.name.localeCompare(b.name);
+  });
+}
 
 function statusLabel(ride: RideItem) {
   if (ride.isOpen) {
@@ -77,35 +86,14 @@ function trendLabel(trendMinutes: number | null) {
   return `${prefix}${trendMinutes} vs 1 hr`;
 }
 
-function isCurrent(entry: ParkHoursEntry, now: Date) {
-  return new Date(entry.openingTime) <= now && now <= new Date(entry.closingTime);
-}
-
-function currentOperatingHours(hours: ParkHoursEntry[]) {
-  return hours.find((entry) => entry.type === "OPERATING") ?? null;
-}
-
-function buildParkChips(hours: ParkHoursEntry[]) {
-  const chips: string[] = [];
-  const now = new Date();
-  const operating = currentOperatingHours(hours);
-
-  if (operating) {
-    const openNow = isCurrent(operating, now);
-    chips.push(openNow ? "Open now" : now < new Date(operating.openingTime) ? "Opens later" : "Closed");
-    chips.push(`${openNow ? "Closes" : "Hours"} ${formatTime(operating.closingTime)}`);
-  } else {
-    chips.push("Hours unavailable");
+function pillVariant(ride: RideItem) {
+  if (!ride.isOpen) {
+    return "wait-pill-status";
   }
-
-  for (const entry of hours) {
-    const label = entry.description ?? entry.type.replaceAll("_", " ");
-    if (entry.type !== "OPERATING") {
-      chips.push(label);
-    }
+  if (ride.waitTime === null) {
+    return "wait-pill-soft";
   }
-
-  return chips;
+  return "wait-pill-live";
 }
 
 function sortRideList(rides: RideItem[], sortMode: RideSort, favorites: string[]) {
@@ -129,14 +117,18 @@ function sortRideList(rides: RideItem[], sortMode: RideSort, favorites: string[]
 }
 
 export function ParkDashboard() {
+  const shellRef = useRef<HTMLElement | null>(null);
+  const parkTabsRef = useRef<HTMLElement | null>(null);
   const [meta, setMeta] = useState<ParkMetaResponse | null>(null);
   const [activePark, setActivePark] = useState<string>("magic-kingdom");
   const [parkData, setParkData] = useState<ParkDetailResponse | null>(null);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [rideSort, setRideSort] = useState<RideSort>("land");
+  const [selectedRide, setSelectedRide] = useState<RideItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [chromeElevated, setChromeElevated] = useState(false);
 
   useEffect(() => {
     const raw = window.localStorage.getItem(FAVORITES_KEY);
@@ -199,6 +191,49 @@ export function ParkDashboard() {
     return () => window.clearInterval(intervalId);
   }, [activePark]);
 
+  useEffect(() => {
+    const shell = shellRef.current;
+    const parkTabs = parkTabsRef.current;
+    if (!shell || !parkTabs) return;
+
+    const updateStickyMetrics = () => {
+      const shellStyles = window.getComputedStyle(shell);
+      const topPadding = Number.parseFloat(shellStyles.paddingTop || "0");
+      const tabsHeight = parkTabs.getBoundingClientRect().height;
+      shell.style.setProperty("--park-tabs-sticky-top", `${topPadding}px`);
+      shell.style.setProperty("--park-tabs-sticky-height", `${tabsHeight}px`);
+      shell.style.setProperty("--land-head-sticky-top", `${topPadding + tabsHeight + 8}px`);
+    };
+
+    updateStickyMetrics();
+
+    const resizeObserver = new ResizeObserver(() => updateStickyMetrics());
+    resizeObserver.observe(parkTabs);
+
+    window.addEventListener("resize", updateStickyMetrics);
+    window.addEventListener("orientationchange", updateStickyMetrics);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateStickyMetrics);
+      window.removeEventListener("orientationchange", updateStickyMetrics);
+    };
+  }, [meta]);
+
+  useEffect(() => {
+    const updateChrome = () => setChromeElevated(window.scrollY > 18);
+    updateChrome();
+    window.addEventListener("scroll", updateChrome, { passive: true });
+    return () => window.removeEventListener("scroll", updateChrome);
+  }, []);
+
+  useEffect(() => {
+    document.body.style.overflow = selectedRide ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [selectedRide]);
+
   function toggleFavorite(attractionId: string) {
     setFavorites((current) => {
       const next = current.includes(attractionId)
@@ -209,19 +244,30 @@ export function ParkDashboard() {
     });
   }
 
+  function openRideDetails(ride: RideItem) {
+    setSelectedRide(ride);
+  }
+
+  function closeRideDetails() {
+    setSelectedRide(null);
+  }
+
   const filteredLands = useMemo<LandGroup[]>(() => {
     if (!parkData) return [];
     const baseLands = !favoritesOnly
       ? parkData.lands
       : parkData.lands
-      .map((land) => ({
-        ...land,
-        rides: land.rides.filter((ride) => favorites.includes(ride.id))
-      }))
-      .filter((land) => land.rides.length > 0);
+          .map((land) => ({
+            ...land,
+            rides: land.rides.filter((ride) => favorites.includes(ride.id))
+          }))
+          .filter((land) => land.rides.length > 0);
 
     if (rideSort === "land") {
-      return baseLands;
+      return baseLands.map((land) => ({
+        ...land,
+        rides: pinFavoritesFirst(land.rides, favorites)
+      }));
     }
 
     if (rideSort === "alpha" || rideSort === "wait-desc" || rideSort === "wait-asc" || rideSort === "favorites") {
@@ -237,15 +283,18 @@ export function ParkDashboard() {
     return baseLands;
   }, [favorites, favoritesOnly, parkData, rideSort]);
 
-  const parkChips = useMemo(() => (parkData ? buildParkChips(parkData.hours) : []), [parkData]);
-
   return (
-    <main className="shell">
+    <main className="shell" ref={shellRef}>
       <section className="hero-card">
         <h1>Disney Wait Times Mobile</h1>
       </section>
 
-      <nav className="park-tabs" aria-label="Walt Disney World parks">
+      <nav
+        aria-label="Walt Disney World parks"
+        className="park-tabs"
+        data-scrolled={chromeElevated ? "true" : "false"}
+        ref={parkTabsRef}
+      >
         {meta?.parks.map((park) => (
           <button
             key={park.slug}
@@ -263,51 +312,32 @@ export function ParkDashboard() {
 
       {!loading && parkData && (
         <>
-          <section className="panel panel-stack meta-tile">
-            <div className="meta-row">
-              <p className="muted">
-                {refreshing
-                  ? "Refreshing..."
-                  : `Last cached update: ${formatRelative(parkData.status.lastSuccessAt)}`}
-              </p>
-              <label className="favorites-toggle">
-                <input
-                  checked={favoritesOnly}
-                  onChange={(event) => setFavoritesOnly(event.target.checked)}
-                  type="checkbox"
-                />
-                Favorites only
-              </label>
-            </div>
-
-            {parkChips.length > 0 && (
-              <div className="chip-row">
-                {parkChips.map((chip) => (
-                  <span className="status-chip" key={chip}>
-                    {chip}
-                  </span>
-                ))}
+          {!parkData.status.hasData && (
+            <section className="panel">
+              <div className="notice state-card">
+                <strong>Waiting for the first sync</strong>
+                <p>The local cache is empty right now. Start the Python collector to load park data.</p>
               </div>
-            )}
+            </section>
+          )}
 
-            {!parkData.status.hasData && (
-              <div className="notice">
-                No cached data is available yet. Start the Python collector to begin polling.
+          {parkData.status.stale && parkData.status.hasData && (
+            <section className="panel">
+              <div className="notice state-card">
+                <strong>Data may be stale</strong>
+                <p>This park hasn&apos;t refreshed in the last 20 minutes, so some waits may be out of date.</p>
               </div>
-            )}
+            </section>
+          )}
 
-            {parkData.status.stale && parkData.status.hasData && (
-              <div className="notice">
-                Cached data is older than 20 minutes, so some values may be stale.
+          {parkData.status.lastError && (
+            <section className="panel">
+              <div className="notice subtle state-card">
+                <strong>Polling note</strong>
+                <p>{parkData.status.lastError}</p>
               </div>
-            )}
-
-            {parkData.status.lastError && (
-              <div className="notice subtle">
-                Latest polling note: {parkData.status.lastError}
-              </div>
-            )}
-          </section>
+            </section>
+          )}
 
           <section className="panel">
             <details>
@@ -369,10 +399,16 @@ export function ParkDashboard() {
 
           <section className="panel">
             <div className="section-head">
-              <h3>Ride Wait Times</h3>
-              <p className="muted">Grouped by land with high-contrast wait indicators.</p>
+              <div>
+                <h3>Ride Wait Times</h3>
+                <p className="muted">
+                  {refreshing
+                    ? "Refreshing..."
+                    : `Last data refresh: ${formatRelative(parkData.status.lastSuccessAt)}`}
+                </p>
+              </div>
             </div>
-            <div className="sort-bar" role="group" aria-label="Sort ride wait times">
+            <div className="sort-strip" role="group" aria-label="Sort and filter ride wait times">
               <button
                 className={rideSort === "land" ? "sort-pill active" : "sort-pill"}
                 onClick={() => setRideSort("land")}
@@ -408,6 +444,13 @@ export function ParkDashboard() {
               >
                 Favorites first
               </button>
+              <button
+                className={favoritesOnly ? "sort-pill active filter-pill" : "sort-pill filter-pill"}
+                onClick={() => setFavoritesOnly((current) => !current)}
+                type="button"
+              >
+                Favorites only
+              </button>
             </div>
             {filteredLands.length === 0 ? (
               <p className="muted">
@@ -427,26 +470,39 @@ export function ParkDashboard() {
                       {land.rides.map((ride) => {
                         const favorite = favorites.includes(ride.id);
                         return (
-                          <article className="ride-row" key={ride.id}>
-                            <div className="ride-copy">
-                              <button
-                                aria-label={favorite ? "Remove favorite" : "Add favorite"}
-                                className={favorite ? "favorite active" : "favorite"}
-                                onClick={() => toggleFavorite(ride.id)}
-                                type="button"
-                              >
-                                {favorite ? "★" : "☆"}
-                              </button>
-                              <div className="ride-text">
-                                <strong>{ride.name}</strong>
-                                {trendLabel(ride.trendMinutes) && (
-                                  <span className="ride-trend">{trendLabel(ride.trendMinutes)}</span>
-                                )}
+                          <article className={favorite ? "ride-row favorite-row" : "ride-row"} key={ride.id}>
+                            <button
+                              aria-haspopup="dialog"
+                              className="ride-main"
+                              onClick={() => openRideDetails(ride)}
+                              type="button"
+                            >
+                              <div className="ride-copy">
+                                <button
+                                  aria-label={favorite ? "Remove favorite" : "Add favorite"}
+                                  className={favorite ? "favorite active" : "favorite"}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggleFavorite(ride.id);
+                                  }}
+                                  type="button"
+                                >
+                                  {favorite ? "★" : "☆"}
+                                </button>
+                                <div className="ride-text">
+                                  <strong>{ride.name}</strong>
+                                  {trendLabel(ride.trendMinutes) && (
+                                    <span className="ride-trend">{trendLabel(ride.trendMinutes)}</span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                            <div className={`wait-pill ${waitTone(ride)}`}>
-                              {minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}
-                            </div>
+                              <div className="ride-side">
+                                <div className={`wait-pill ${pillVariant(ride)} ${waitTone(ride)}`}>
+                                  {minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}
+                                </div>
+                                <span className="ride-chevron">+</span>
+                              </div>
+                            </button>
                           </article>
                         );
                       })}
@@ -464,6 +520,58 @@ export function ParkDashboard() {
           Powered by Queue-Times.com
         </a>
       </footer>
+
+      {selectedRide && (
+        <div aria-modal="true" className="sheet-backdrop" onClick={closeRideDetails} role="dialog">
+          <section className="ride-sheet" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-handle" />
+            <div className="sheet-head">
+              <div>
+                <p className="sheet-label">Ride details</p>
+                <h3>{selectedRide.name}</h3>
+              </div>
+              <button
+                aria-label="Close ride details"
+                className="sheet-close"
+                onClick={closeRideDetails}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="sheet-meta">
+              <div className={`wait-pill ${pillVariant(selectedRide)} ${waitTone(selectedRide)}`}>
+                {minutesLabel(selectedRide.waitTime, selectedRide.isOpen) ?? statusLabel(selectedRide)}
+              </div>
+              <button
+                className={favorites.includes(selectedRide.id) ? "sheet-favorite active" : "sheet-favorite"}
+                onClick={() => toggleFavorite(selectedRide.id)}
+                type="button"
+              >
+                {favorites.includes(selectedRide.id) ? "★ Favorited" : "☆ Add favorite"}
+              </button>
+            </div>
+
+            <div className="sheet-details">
+              <article className="sheet-card">
+                <span className="sheet-card-label">Status</span>
+                <strong>{selectedRide.isOpen ? "Operating" : statusLabel(selectedRide)}</strong>
+              </article>
+              <article className="sheet-card">
+                <span className="sheet-card-label">Last updated</span>
+                <strong>{formatRelative(selectedRide.lastUpdated)}</strong>
+              </article>
+              {trendLabel(selectedRide.trendMinutes) && (
+                <article className="sheet-card">
+                  <span className="sheet-card-label">Trend</span>
+                  <strong>{trendLabel(selectedRide.trendMinutes)}</strong>
+                </article>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

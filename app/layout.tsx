@@ -5,10 +5,16 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Disney Wait Times Mobile",
   description: "Mobile-first Walt Disney World wait times, hours, and showtimes.",
+  formatDetection: {
+    telephone: false
+  },
   appleWebApp: {
     capable: true,
-    statusBarStyle: "default",
+    statusBarStyle: "black-translucent",
     title: "DWT Mobile"
+  },
+  icons: {
+    apple: "/apple-touch-icon"
   }
 };
 
@@ -29,4 +35,3 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     </html>
   );
 }
-
