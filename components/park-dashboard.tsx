@@ -5,9 +5,12 @@ import type { ParkDetailResponse, ParkMetaResponse } from "@/lib/types";
 
 const FAVORITES_KEY = "dwtmobile:favorites";
 
-function minutesLabel(waitTime: number | null) {
+function minutesLabel(waitTime: number | null, isOpen: boolean) {
+  if (!isOpen) {
+    return "CLOSED";
+  }
   if (waitTime === null || Number.isNaN(waitTime)) {
-    return "No posted wait";
+    return "No wait";
   }
   if (waitTime === 0) {
     return "Walk on";
@@ -112,12 +115,7 @@ export function ParkDashboard() {
   return (
     <main className="shell">
       <section className="hero-card">
-        <p className="eyebrow">Disney Wait Times Mobile</p>
-        <h1>Four parks, one bright-and-readable view.</h1>
-        <p className="hero-copy">
-          Live wait times, today&apos;s hours, featured nighttime entertainment, and
-          character greetings backed by cached SQLite data.
-        </p>
+        <h1>Disney Wait Times Mobile</h1>
       </section>
 
       <nav className="park-tabs" aria-label="Walt Disney World parks">
@@ -137,14 +135,11 @@ export function ParkDashboard() {
 
       {!loading && parkData && (
         <>
-          <section className="panel panel-stack">
-            <div className="panel-head">
-              <div>
-                <h2>{parkData.park.shortName}</h2>
-                <p className="muted">
-                  Last cached update: {formatRelative(parkData.status.lastSuccessAt)}
-                </p>
-              </div>
+          <section className="panel panel-stack meta-tile">
+            <div className="meta-row">
+              <p className="muted">
+                Last cached update: {formatRelative(parkData.status.lastSuccessAt)}
+              </p>
               <label className="favorites-toggle">
                 <input
                   checked={favoritesOnly}
@@ -175,36 +170,40 @@ export function ParkDashboard() {
           </section>
 
           <section className="panel">
-            <div className="section-head">
-              <h3>Park Hours Today</h3>
-            </div>
-            {parkData.hours.length === 0 ? (
-              <p className="muted">Hours are unavailable right now.</p>
-            ) : (
-              <div className="hour-list">
-                {parkData.hours.map((entry) => (
-                  <article className="hour-chip" key={`${entry.type}-${entry.openingTime}`}>
-                    <strong>{entry.description ?? entry.type.replaceAll("_", " ")}</strong>
-                    <span>{formatHourRange(entry.openingTime, entry.closingTime)}</span>
-                  </article>
-                ))}
+            <details>
+              <summary>Park Hours Today</summary>
+              <div className="details-body">
+                {parkData.hours.length === 0 ? (
+                  <p className="muted">Hours are unavailable right now.</p>
+                ) : (
+                  <div className="hour-list">
+                    {parkData.hours.map((entry) => (
+                      <article className="hour-chip" key={`${entry.type}-${entry.openingTime}`}>
+                        <strong>{entry.description ?? entry.type.replaceAll("_", " ")}</strong>
+                        <span>{formatHourRange(entry.openingTime, entry.closingTime)}</span>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+            </details>
           </section>
 
           {parkData.featuredShows.length > 0 && (
             <section className="panel">
-              <div className="section-head">
-                <h3>Featured Showtimes</h3>
-              </div>
-              <div className="show-grid">
-                {parkData.featuredShows.map((show) => (
-                  <article className="show-card" key={`${show.id}-${show.startTime}`}>
-                    <strong>{show.name}</strong>
-                    <span>{formatTime(show.startTime)}</span>
-                  </article>
-                ))}
-              </div>
+              <details>
+                <summary>Featured Showtimes</summary>
+                <div className="details-body">
+                  <div className="show-grid">
+                    {parkData.featuredShows.map((show) => (
+                      <article className="show-card" key={`${show.id}-${show.startTime}`}>
+                        <strong>{show.name}</strong>
+                        <span>{formatTime(show.startTime)}</span>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              </details>
             </section>
           )}
 
@@ -261,15 +260,10 @@ export function ParkDashboard() {
                               >
                                 {favorite ? "★" : "☆"}
                               </button>
-                              <div>
-                                <strong>{ride.name}</strong>
-                                <p className="muted">
-                                  {ride.isOpen ? ride.status : "Temporarily unavailable"}
-                                </p>
-                              </div>
+                              <strong>{ride.name}</strong>
                             </div>
                             <div className={`wait-pill ${waitTone(ride.waitTime, ride.isOpen)}`}>
-                              {minutesLabel(ride.waitTime)}
+                              {minutesLabel(ride.waitTime, ride.isOpen)}
                             </div>
                           </article>
                         );
