@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Disney Wait Times Mobile icon">
+  <rect width="256" height="256" rx="56" fill="#f2f2ef"/>
+  <rect x="28" y="28" width="200" height="200" rx="42" fill="#1e1e1e"/>
+  <path d="M70 78h40c27 0 48 22 48 50s-21 50-48 50H70z" fill="#f2f2ef"/>
+  <path d="M102 108h8c12 0 20 8 20 20s-8 20-20 20h-8z" fill="#1e1e1e"/>
+  <path d="M154 78h32v100h-32z" fill="#f2f2ef"/>
+</svg>
+
