@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import { PwaRegister } from "@/components/pwa-register";
+import { VisitTracker } from "@/components/visit-tracker";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Disney Wait Times Mobile",
   description: "Mobile-first Walt Disney World wait times, hours, and showtimes.",
+  applicationName: "Disney Wait Times Mobile",
   formatDetection: {
     telephone: false
   },
@@ -14,7 +16,11 @@ export const metadata: Metadata = {
     title: "DWT Mobile"
   },
   icons: {
+    icon: "/icon.svg",
     apple: "/apple-touch-icon"
+  },
+  other: {
+    "apple-mobile-web-app-title": "DWT Mobile"
   }
 };
 
@@ -30,6 +36,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en">
       <body>
         <PwaRegister />
+        <VisitTracker />
         {children}
       </body>
     </html>

@@ -25,6 +25,8 @@ export type RideItem = {
   isOpen: boolean;
   lastUpdated: string | null;
   trendMinutes: number | null;
+  normalWaitTime: number | null;
+  previousIsOpen: boolean | null;
 };
 
 export type LandGroup = {

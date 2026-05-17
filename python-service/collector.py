@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 import sys
 import time
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "disney_wait_times.db"
 EASTERN = ZoneInfo("America/New_York")
+LOGGER = logging.getLogger("dwtmobile.collector")
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,25 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             last_error TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS poll_cycles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL,
+            success_count INTEGER NOT NULL,
+            failure_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS source_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            park_slug TEXT NOT NULL,
+            source TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            error TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_wait_snapshots_park_time
             ON wait_snapshots (park_slug, captured_at);
         CREATE INDEX IF NOT EXISTS idx_wait_snapshots_attraction_time
@@ -143,6 +164,10 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             ON showtimes (park_slug, category);
         CREATE INDEX IF NOT EXISTS idx_park_schedules_park_date
             ON park_schedules (park_slug, schedule_date);
+        CREATE INDEX IF NOT EXISTS idx_poll_cycles_started
+            ON poll_cycles (started_at);
+        CREATE INDEX IF NOT EXISTS idx_source_checks_source_time
+            ON source_checks (source, checked_at);
         """
     )
 
@@ -184,6 +209,39 @@ def fetch_json(url: str) -> dict[str, Any]:
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_json_with_telemetry(
+    connection: sqlite3.Connection,
+    *,
+    park_slug: str,
+    source: str,
+    url: str,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    checked_at = utc_now().isoformat()
+    try:
+        payload = fetch_json(url)
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        connection.execute(
+            """
+            INSERT INTO source_checks (park_slug, source, checked_at, success, duration_ms, error)
+            VALUES (?, ?, ?, 0, ?, ?)
+            """,
+            (park_slug, source, checked_at, duration_ms, str(exc)),
+        )
+        raise
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    connection.execute(
+        """
+        INSERT INTO source_checks (park_slug, source, checked_at, success, duration_ms, error)
+        VALUES (?, ?, ?, 1, ?, NULL)
+        """,
+        (park_slug, source, checked_at, duration_ms),
+    )
+    return payload
 
 
 def build_queue_times_map(queue_times_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -373,9 +431,13 @@ def insert_wait_snapshot(
     )
 
 
-def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
+def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
     polled_at = utc_now()
     captured_at = polled_at.isoformat()
+    ride_count = 0
+    meet_greet_count = 0
+
+    LOGGER.info("Polling %s", park.short_name)
 
     connection.execute(
         """
@@ -388,14 +450,23 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
     connection.commit()
 
     try:
-        queue_times_payload = fetch_json(
-            f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json"
+        queue_times_payload = fetch_json_with_telemetry(
+            connection,
+            park_slug=park.slug,
+            source="queue-times",
+            url=f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json",
         )
-        themeparks_live = fetch_json(
-            f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/live"
+        themeparks_live = fetch_json_with_telemetry(
+            connection,
+            park_slug=park.slug,
+            source="themeparks-live",
+            url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/live",
         )
-        themeparks_schedule = fetch_json(
-            f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule"
+        themeparks_schedule = fetch_json_with_telemetry(
+            connection,
+            park_slug=park.slug,
+            source="themeparks-schedule",
+            url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule",
         )
 
         qt_by_name = build_queue_times_map(queue_times_payload)
@@ -441,6 +512,7 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
                     is_open=is_open,
                     queue_type="STANDBY",
                 )
+                ride_count += 1
 
             elif entity_type == "SHOW" and is_meet_greet(name):
                 standby = (item.get("queue") or {}).get("STANDBY") or {}
@@ -467,6 +539,7 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
                     is_open=is_open,
                     queue_type="STANDBY",
                 )
+                meet_greet_count += 1
 
         replace_schedule(connection, park.slug, captured_at, themeparks_schedule)
         replace_showtimes(connection, park, captured_at, themeparks_live)
@@ -480,6 +553,13 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
             (captured_at, park.slug),
         )
         connection.commit()
+        LOGGER.info(
+            "Updated %s: %s rides, %s meet-and-greets",
+            park.short_name,
+            ride_count,
+            meet_greet_count,
+        )
+        return True
 
     except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
         connection.execute(
@@ -487,18 +567,56 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> None:
             (str(exc), park.slug),
         )
         connection.commit()
+        LOGGER.warning("Polling failed for %s: %s", park.short_name, exc)
+        return False
 
 
 def run_once(connection: sqlite3.Connection) -> None:
+    started_at = utc_now()
+    started = time.monotonic()
+    success_count = 0
+    failure_count = 0
+    LOGGER.info("Starting poll cycle")
     for park in PARKS:
-        process_park(connection, park)
+        if process_park(connection, park):
+            success_count += 1
+        else:
+            failure_count += 1
     prune_old_data(connection, utc_now())
+    finished_at = utc_now()
+    connection.execute(
+        """
+        INSERT INTO poll_cycles (
+            started_at, finished_at, duration_seconds, success_count, failure_count
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            started_at.isoformat(),
+            finished_at.isoformat(),
+            int(time.monotonic() - started),
+            success_count,
+            failure_count,
+        ),
+    )
+    connection.commit()
+    LOGGER.info("Finished poll cycle")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll Walt Disney World wait times into SQLite.")
     parser.add_argument("--once", action="store_true", help="Run one poll cycle and exit.")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Set collector log verbosity.",
+    )
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
@@ -515,7 +633,9 @@ def main() -> int:
         now_eastern = datetime.now(EASTERN)
         target_sleep = sleep_seconds_for_current_window(now_eastern)
         elapsed = max(0, int(time.monotonic() - started))
-        time.sleep(max(30, target_sleep - elapsed))
+        sleep_for = max(30, target_sleep - elapsed)
+        LOGGER.info("Sleeping %s seconds before next cycle", sleep_for)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":

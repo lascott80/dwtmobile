@@ -143,7 +143,18 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
             ws.status,
             ws.is_open AS isOpen,
             ws.source_updated_at AS lastUpdated,
-            previous.wait_time AS trendWaitTime
+            previous.wait_time AS trendWaitTime,
+            previous.is_open AS previousIsOpen,
+            (
+              SELECT ROUND(AVG(s3.wait_time))
+              FROM wait_snapshots s3
+              WHERE s3.attraction_id = a.id
+                AND s3.park_slug = ?
+                AND s3.wait_time IS NOT NULL
+                AND s3.is_open = 1
+                AND date(s3.captured_at, 'localtime') < date('now', 'localtime')
+                AND strftime('%H', s3.captured_at, 'localtime') = strftime('%H', 'now', 'localtime')
+            ) AS normalWaitTime
           FROM attractions a
           LEFT JOIN (
             SELECT s1.*
@@ -171,7 +182,7 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
           ORDER BY areaSort, a.name
         `
       )
-      .all(park.slug, park.slug, park.slug) as Array<{
+      .all(park.slug, park.slug, park.slug, park.slug) as Array<{
         id: string;
         name: string;
         areaName: string;
@@ -181,6 +192,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         isOpen: number | null;
         lastUpdated: string | null;
         trendWaitTime: number | null;
+        previousIsOpen: number | null;
+        normalWaitTime: number | null;
       }>;
 
     const grouped = new Map<string, LandGroup>();
@@ -196,7 +209,9 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         isOpen: Boolean(ride.isOpen),
         lastUpdated: ride.lastUpdated,
         trendMinutes:
-          ride.waitTime === null || ride.trendWaitTime === null ? null : ride.waitTime - ride.trendWaitTime
+          ride.waitTime === null || ride.trendWaitTime === null ? null : ride.waitTime - ride.trendWaitTime,
+        normalWaitTime: ride.normalWaitTime,
+        previousIsOpen: ride.previousIsOpen === null ? null : Boolean(ride.previousIsOpen)
       });
     }
 

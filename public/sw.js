@@ -1,14 +1,19 @@
-const CACHE_NAME = "dwtmobile-shell-v1";
-const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/icon.svg"];
+const SHELL_CACHE = "dwtmobile-shell-v2";
+const DATA_CACHE = "dwtmobile-data-v1";
+const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/icon.svg", "/apple-touch-icon"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_ASSETS)));
+  event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)));
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+      Promise.all(
+        keys
+          .filter((key) => key !== SHELL_CACHE && key !== DATA_CACHE)
+          .map((key) => caches.delete(key))
+      )
     )
   );
 });
@@ -16,14 +21,29 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
 
+  const url = new URL(event.request.url);
+  const isApiRequest = url.origin === self.location.origin && url.pathname.startsWith("/api/");
+
+  if (isApiRequest) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(DATA_CACHE).then((cache) => cache.put(event.request, copy));
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
   event.respondWith(
     fetch(event.request)
       .then((response) => {
         const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, copy));
         return response;
       })
       .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
   );
 });
-

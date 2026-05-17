@@ -18,12 +18,12 @@ export default function AppleTouchIcon() {
           alignItems: "center",
           justifyContent: "center",
           background:
-            "linear-gradient(180deg, rgb(246,246,241) 0%, rgb(233,233,225) 100%)",
+            "linear-gradient(180deg, rgb(255,255,255) 0%, rgb(242,242,247) 100%)",
           borderRadius: 36,
-          color: "rgb(28,28,28)",
-          fontSize: 82,
-          fontWeight: 800,
-          letterSpacing: -4
+          color: "rgb(29,29,31)",
+          fontSize: 76,
+          fontWeight: 750,
+          letterSpacing: -5
         }}
       >
         DWT

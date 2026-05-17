@@ -6,15 +6,22 @@ export default function manifest(): MetadataRoute.Manifest {
     short_name: "DWT Mobile",
     description: "Cached wait times and showtimes for all four Walt Disney World parks.",
     start_url: "/",
+    scope: "/",
     display: "standalone",
-    background_color: "#f2f2ef",
-    theme_color: "#f2f2ef",
+    orientation: "portrait",
+    background_color: "#f5f5f7",
+    theme_color: "#f5f5f7",
     icons: [
       {
         src: "/icon.svg",
         sizes: "any",
         type: "image/svg+xml",
         purpose: "maskable"
+      },
+      {
+        src: "/apple-touch-icon",
+        sizes: "180x180",
+        type: "image/png"
       }
     ]
   };
