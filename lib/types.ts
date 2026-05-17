@@ -2,6 +2,7 @@ export type ParkSummary = {
   slug: string;
   name: string;
   shortName: string;
+  summary: string;
 };
 
 export type ParkMetaResponse = {
@@ -23,6 +24,7 @@ export type RideItem = {
   waitTime: number | null;
   isOpen: boolean;
   lastUpdated: string | null;
+  trendMinutes: number | null;
 };
 
 export type LandGroup = {
@@ -51,4 +53,3 @@ export type ParkDetailResponse = {
   meetGreets: ShowTimeItem[];
   lands: LandGroup[];
 };
-

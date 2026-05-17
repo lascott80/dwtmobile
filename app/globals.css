@@ -113,9 +113,12 @@ h1 {
   appearance: none;
   border: 0;
   border-radius: 16px;
-  padding: 12px 8px;
+  padding: 10px 8px;
   background: transparent;
   color: var(--ink-soft);
+  display: grid;
+  gap: 3px;
+  text-align: left;
   font-size: 0.82rem;
   font-weight: 700;
 }
@@ -123,6 +126,13 @@ h1 {
 .park-tab.active {
   background: var(--accent);
   color: white;
+}
+
+.park-tab small {
+  font-size: 0.67rem;
+  line-height: 1.15;
+  font-weight: 600;
+  opacity: 0.9;
 }
 
 .panel {
@@ -163,6 +173,46 @@ h1 {
   gap: 8px;
   color: var(--ink-soft);
   font-size: 0.88rem;
+}
+
+.chip-row,
+.sort-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-chip,
+.sort-pill {
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.status-chip {
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.sort-bar {
+  margin-top: 14px;
+}
+
+.sort-pill {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--bg-panel-strong);
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.sort-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
 }
 
 .muted {
@@ -260,6 +310,18 @@ details summary {
   display: block;
   font-size: 0.95rem;
   line-height: 1.2;
+}
+
+.ride-text {
+  min-width: 0;
+}
+
+.ride-trend {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  line-height: 1.1;
 }
 
 .favorite {

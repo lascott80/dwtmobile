@@ -15,10 +15,57 @@ function connect() {
   return db;
 }
 
+function getTodayHours(database: DatabaseSync, parkSlug: string) {
+  return database
+    .prepare(
+      `
+        SELECT type, description, opening_time AS openingTime, closing_time AS closingTime
+        FROM park_schedules
+        WHERE park_slug = ? AND schedule_date = date('now', 'localtime')
+        ORDER BY opening_time
+      `
+    )
+    .all(parkSlug) as ParkHoursEntry[];
+}
+
+function getOperatingSummary(hours: ParkHoursEntry[]) {
+  const operating = hours.find((entry) => entry.type === "OPERATING");
+  if (!operating) {
+    return "Hours unavailable";
+  }
+
+  const now = new Date();
+  const opening = new Date(operating.openingTime);
+  const closing = new Date(operating.closingTime);
+  const formattedClosing = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(closing);
+
+  if (now < opening) {
+    return `Opens ${new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit"
+    }).format(opening)}`;
+  }
+
+  if (now <= closing) {
+    return `Open until ${formattedClosing}`;
+  }
+
+  return "Closed";
+}
+
 export function getParkMeta() {
+  const database = connect();
   return {
     generatedAt: new Date().toISOString(),
-    parks: PARKS.map(({ slug, name, shortName }) => ({ slug, name, shortName }))
+    parks: PARKS.map(({ slug, name, shortName }) => ({
+      slug,
+      name,
+      shortName,
+      summary: database ? getOperatingSummary(getTodayHours(database, slug)) : "Hours unavailable"
+    }))
   };
 }
 
@@ -34,7 +81,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       park: {
         slug: park.slug,
         name: park.name,
-        shortName: park.shortName
+        shortName: park.shortName,
+        summary: "Hours unavailable"
       },
       status: {
         hasData: false,
@@ -59,16 +107,7 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       )
       .get(park.slug) as { lastSuccessAt: string | null; lastError: string | null } | undefined;
 
-    const hours = database
-      .prepare(
-        `
-          SELECT type, description, opening_time AS openingTime, closing_time AS closingTime
-          FROM park_schedules
-          WHERE park_slug = ? AND schedule_date = date('now', 'localtime')
-          ORDER BY opening_time
-        `
-      )
-      .all(park.slug) as ParkHoursEntry[];
+    const hours = getTodayHours(database, park.slug);
 
     const featuredShows = database
       .prepare(
@@ -103,7 +142,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
             ws.wait_time AS waitTime,
             ws.status,
             ws.is_open AS isOpen,
-            ws.source_updated_at AS lastUpdated
+            ws.source_updated_at AS lastUpdated,
+            previous.wait_time AS trendWaitTime
           FROM attractions a
           LEFT JOIN (
             SELECT s1.*
@@ -117,11 +157,21 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
               ON latest.attraction_id = s1.attraction_id
              AND latest.captured_at = s1.captured_at
           ) ws ON ws.attraction_id = a.id
+          LEFT JOIN wait_snapshots previous
+            ON previous.id = (
+              SELECT s2.id
+              FROM wait_snapshots s2
+              WHERE s2.attraction_id = a.id
+                AND s2.park_slug = ?
+                AND datetime(s2.captured_at) <= datetime('now', '-55 minutes')
+              ORDER BY datetime(s2.captured_at) DESC
+              LIMIT 1
+            )
           WHERE a.park_slug = ? AND a.category = 'ride'
           ORDER BY areaSort, a.name
         `
       )
-      .all(park.slug, park.slug) as Array<{
+      .all(park.slug, park.slug, park.slug) as Array<{
         id: string;
         name: string;
         areaName: string;
@@ -130,6 +180,7 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         status: string | null;
         isOpen: number | null;
         lastUpdated: string | null;
+        trendWaitTime: number | null;
       }>;
 
     const grouped = new Map<string, LandGroup>();
@@ -143,7 +194,9 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         status: ride.status ?? "UNKNOWN",
         waitTime: ride.waitTime,
         isOpen: Boolean(ride.isOpen),
-        lastUpdated: ride.lastUpdated
+        lastUpdated: ride.lastUpdated,
+        trendMinutes:
+          ride.waitTime === null || ride.trendWaitTime === null ? null : ride.waitTime - ride.trendWaitTime
       });
     }
 
@@ -157,7 +210,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       park: {
         slug: park.slug,
         name: park.name,
-        shortName: park.shortName
+        shortName: park.shortName,
+        summary: getOperatingSummary(hours)
       },
       status: {
         hasData,
@@ -175,7 +229,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       park: {
         slug: park.slug,
         name: park.name,
-        shortName: park.shortName
+        shortName: park.shortName,
+        summary: "Hours unavailable"
       },
       status: {
         hasData: false,
