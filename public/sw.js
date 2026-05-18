@@ -1,6 +1,6 @@
 const SHELL_CACHE = "dwtmobile-shell-v2";
 const DATA_CACHE = "dwtmobile-data-v1";
-const SHELL_ASSETS = ["/", "/manifest.webmanifest", "/icon.svg", "/apple-touch-icon"];
+const SHELL_ASSETS = ["/", "/offline", "/manifest.webmanifest", "/icon.svg", "/apple-icon"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)));
@@ -44,6 +44,6 @@ self.addEventListener("fetch", (event) => {
         caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, copy));
         return response;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
+      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/offline")))
   );
 });

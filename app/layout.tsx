@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { PwaRegister } from "@/components/pwa-register";
 import { VisitTracker } from "@/components/visit-tracker";
+import "leaflet/dist/leaflet.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,7 +18,7 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: "/icon.svg",
-    apple: "/apple-touch-icon"
+    apple: "/apple-icon"
   },
   other: {
     "apple-mobile-web-app-title": "DWT Mobile"

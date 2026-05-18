@@ -7,7 +7,7 @@ export const size = {
 
 export const contentType = "image/png";
 
-export default function AppleTouchIcon() {
+export default function AppleIcon() {
   return new ImageResponse(
     (
       <div

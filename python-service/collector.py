@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,27 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             area_name TEXT,
             area_sort INTEGER,
             queue_times_ride_id INTEGER,
+            latitude REAL,
+            longitude REAL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS restaurants (
+            id TEXT PRIMARY KEY,
+            park_slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS facilities (
+            id TEXT PRIMARY KEY,
+            park_slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
             updated_at TEXT NOT NULL
         );
 
@@ -171,12 +193,23 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             ON showtimes (park_slug, category);
         CREATE INDEX IF NOT EXISTS idx_park_schedules_park_date
             ON park_schedules (park_slug, schedule_date);
+        CREATE INDEX IF NOT EXISTS idx_restaurants_park
+            ON restaurants (park_slug);
+        CREATE INDEX IF NOT EXISTS idx_facilities_park
+            ON facilities (park_slug);
         CREATE INDEX IF NOT EXISTS idx_poll_cycles_started
             ON poll_cycles (started_at);
         CREATE INDEX IF NOT EXISTS idx_source_checks_source_time
             ON source_checks (source, checked_at);
         """
     )
+    existing_attraction_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(attractions)").fetchall()
+    }
+    if "latitude" not in existing_attraction_columns:
+        connection.execute("ALTER TABLE attractions ADD COLUMN latitude REAL")
+    if "longitude" not in existing_attraction_columns:
+        connection.execute("ALTER TABLE attractions ADD COLUMN longitude REAL")
 
     connection.executemany(
         """
@@ -376,13 +409,15 @@ def upsert_attraction(
     area_name: str | None,
     area_sort: int | None,
     queue_times_ride_id: int | None,
+    latitude: float | None,
+    longitude: float | None,
     updated_at: str,
 ) -> None:
     connection.execute(
         """
         INSERT INTO attractions (
-            id, park_slug, name, entity_type, category, area_name, area_sort, queue_times_ride_id, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, park_slug, name, entity_type, category, area_name, area_sort, queue_times_ride_id, latitude, longitude, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             park_slug = excluded.park_slug,
             name = excluded.name,
@@ -391,6 +426,8 @@ def upsert_attraction(
             area_name = excluded.area_name,
             area_sort = excluded.area_sort,
             queue_times_ride_id = excluded.queue_times_ride_id,
+            latitude = excluded.latitude,
+            longitude = excluded.longitude,
             updated_at = excluded.updated_at
         """,
         (
@@ -402,8 +439,123 @@ def upsert_attraction(
             area_name,
             area_sort,
             queue_times_ride_id,
+            latitude,
+            longitude,
             updated_at,
         ),
+    )
+
+
+def replace_restaurants(connection: sqlite3.Connection, park: ParkConfig, captured_at: str, children_payload: dict[str, Any]) -> None:
+    connection.execute("DELETE FROM restaurants WHERE park_slug = ?", (park.slug,))
+    rows = []
+    for item in children_payload.get("children", []):
+        if item.get("entityType") != "RESTAURANT":
+            continue
+        location = item.get("location") or {}
+        rows.append(
+            (
+                item.get("id"),
+                park.slug,
+                item.get("name"),
+                location.get("latitude"),
+                location.get("longitude"),
+                captured_at,
+            )
+        )
+    connection.executemany(
+        """
+        INSERT INTO restaurants (id, park_slug, name, latitude, longitude, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+
+def fetch_osm_facilities(connection: sqlite3.Connection, park: ParkConfig, children_payload: dict[str, Any]) -> dict[str, Any]:
+    points = [
+        item.get("location")
+        for item in children_payload.get("children", [])
+        if item.get("location")
+    ]
+    if not points:
+        return {"elements": []}
+    min_lat = min(point["latitude"] for point in points) - 0.002
+    max_lat = max(point["latitude"] for point in points) + 0.002
+    min_lon = min(point["longitude"] for point in points) - 0.002
+    max_lon = max(point["longitude"] for point in points) + 0.002
+    query = f"""
+    [out:json][timeout:25];
+    (
+      node["amenity"="toilets"]({min_lat},{min_lon},{max_lat},{max_lon});
+      node["amenity"="drinking_water"]({min_lat},{min_lon},{max_lat},{max_lon});
+      node["amenity"="first_aid"]({min_lat},{min_lon},{max_lat},{max_lon});
+      node["healthcare"="first_aid"]({min_lat},{min_lon},{max_lat},{max_lon});
+    );
+    out body;
+    """
+    request = urllib.request.Request(
+        "https://overpass-api.de/api/interpreter",
+        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    started = time.monotonic()
+    checked_at = utc_now().isoformat()
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        connection.execute(
+            """
+            INSERT INTO source_checks (park_slug, source, checked_at, success, duration_ms, error)
+            VALUES (?, 'osm-overpass', ?, 0, ?, ?)
+            """,
+            (park.slug, checked_at, duration_ms, str(exc)),
+        )
+        return {"elements": []}
+    duration_ms = int((time.monotonic() - started) * 1000)
+    connection.execute(
+        """
+        INSERT INTO source_checks (park_slug, source, checked_at, success, duration_ms, error)
+        VALUES (?, 'osm-overpass', ?, 1, ?, NULL)
+        """,
+        (park.slug, checked_at, duration_ms),
+    )
+    return payload
+
+
+def replace_facilities(connection: sqlite3.Connection, park: ParkConfig, captured_at: str, osm_payload: dict[str, Any]) -> None:
+    connection.execute("DELETE FROM facilities WHERE park_slug = ?", (park.slug,))
+    rows = []
+    for item in osm_payload.get("elements", []):
+        tags = item.get("tags") or {}
+        if tags.get("amenity") == "toilets":
+            category = "restroom"
+        elif tags.get("amenity") == "drinking_water":
+            category = "water"
+        elif tags.get("amenity") == "first_aid" or tags.get("healthcare") == "first_aid":
+            category = "first-aid"
+        else:
+            continue
+        rows.append(
+            (
+                f"osm-{item.get('type', 'node')}-{item.get('id')}",
+                park.slug,
+                tags.get("name") or category.replace("-", " ").title(),
+                category,
+                item.get("lat"),
+                item.get("lon"),
+                captured_at,
+            )
+        )
+    connection.executemany(
+        """
+        INSERT INTO facilities (id, park_slug, name, category, latitude, longitude, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
     )
 
 
@@ -475,8 +627,15 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
             source="themeparks-schedule",
             url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule",
         )
+        themeparks_children = fetch_json_with_telemetry(
+            connection,
+            park_slug=park.slug,
+            source="themeparks-children",
+            url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/children",
+        )
 
         qt_by_name = build_queue_times_map(queue_times_payload)
+        children_by_id = {item.get("id"): item for item in themeparks_children.get("children", [])}
 
         for item in themeparks_live.get("liveData", []):
             entity_type = item.get("entityType", "UNKNOWN")
@@ -508,6 +667,8 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
                     area_name=queue_match.get("area_name"),
                     area_sort=queue_match.get("area_sort"),
                     queue_times_ride_id=queue_match.get("queue_times_ride_id"),
+                    latitude=(children_by_id.get(item["id"], {}).get("location") or {}).get("latitude"),
+                    longitude=(children_by_id.get(item["id"], {}).get("location") or {}).get("longitude"),
                     updated_at=captured_at,
                 )
                 insert_wait_snapshot(
@@ -535,6 +696,8 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
                     area_name=queue_match.get("area_name"),
                     area_sort=queue_match.get("area_sort"),
                     queue_times_ride_id=queue_match.get("queue_times_ride_id"),
+                    latitude=(children_by_id.get(item["id"], {}).get("location") or {}).get("latitude"),
+                    longitude=(children_by_id.get(item["id"], {}).get("location") or {}).get("longitude"),
                     updated_at=captured_at,
                 )
                 insert_wait_snapshot(
@@ -552,6 +715,8 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
 
         replace_schedule(connection, park.slug, captured_at, themeparks_schedule)
         replace_showtimes(connection, park, captured_at, themeparks_live)
+        replace_restaurants(connection, park, captured_at, themeparks_children)
+        replace_facilities(connection, park, captured_at, fetch_osm_facilities(connection, park, themeparks_children))
 
         connection.execute(
             """

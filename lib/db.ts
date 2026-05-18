@@ -1,7 +1,16 @@
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { DB_PATH, PARKS } from "@/lib/config";
-import type { LandGroup, ParkDetailResponse, ParkHoursEntry, ShowTimeItem } from "@/lib/types";
+import type {
+  CrowdPulse,
+  FacilityItem,
+  LandGroup,
+  ParkDetailResponse,
+  ParkHoursEntry,
+  RestaurantItem,
+  RideHistoryResponse,
+  ShowTimeItem
+} from "@/lib/types";
 
 let db: DatabaseSync | null = null;
 const HIDDEN_RIDE_NAMES = [
@@ -63,6 +72,83 @@ function getOperatingSummary(hours: ParkHoursEntry[]) {
   return "Closed";
 }
 
+function average(values: number[]) {
+  if (values.length === 0) return null;
+  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function buildCrowdPulse(
+  rides: Array<{
+    waitTime: number | null;
+    isOpen: number | null;
+    normalWaitTime: number | null;
+  }>
+): CrowdPulse {
+  const openWaits = rides
+    .filter((ride) => Boolean(ride.isOpen) && ride.waitTime !== null)
+    .map((ride) => ride.waitTime as number);
+  const comparableRides = rides.filter(
+    (ride) => Boolean(ride.isOpen) && ride.waitTime !== null && ride.normalWaitTime !== null
+  );
+  const averageWaitTime = average(openWaits);
+  const averageDelta = average(
+    comparableRides.map((ride) => (ride.waitTime as number) - (ride.normalWaitTime as number))
+  );
+
+  if (comparableRides.length >= 5 && averageDelta !== null) {
+    if (averageDelta <= -10) {
+      return {
+        level: "lighter",
+        headline: "Lighter than usual",
+        detail: `Open rides are averaging ${Math.abs(averageDelta)} min below normal right now.`,
+        averageWaitTime,
+        deltaFromNormal: averageDelta,
+        sampleSize: comparableRides.length
+      };
+    }
+
+    if (averageDelta >= 10) {
+      return {
+        level: "busier",
+        headline: "Busier than usual",
+        detail: `Open rides are averaging ${averageDelta} min above normal right now.`,
+        averageWaitTime,
+        deltaFromNormal: averageDelta,
+        sampleSize: comparableRides.length
+      };
+    }
+
+    return {
+      level: "typical",
+      headline: "Near normal",
+      detail: `Open rides are tracking close to their usual waits for this hour.`,
+      averageWaitTime,
+      deltaFromNormal: averageDelta,
+      sampleSize: comparableRides.length
+    };
+  }
+
+  if (averageWaitTime !== null) {
+    return {
+      level: "building",
+      headline: "Building baseline",
+      detail: `Current open rides average ${averageWaitTime} min while more history accumulates.`,
+      averageWaitTime,
+      deltaFromNormal: null,
+      sampleSize: openWaits.length
+    };
+  }
+
+  return {
+    level: "building",
+    headline: "Building baseline",
+    detail: "Not enough live ride data yet to read the park pulse.",
+    averageWaitTime: null,
+    deltaFromNormal: null,
+    sampleSize: 0
+  };
+}
+
 export function getParkMeta() {
   const database = connect();
   return {
@@ -100,6 +186,16 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       hours: [],
       featuredShows: [],
       meetGreets: [],
+      crowdPulse: {
+        level: "building",
+        headline: "Building baseline",
+        detail: "Not enough live ride data yet to read the park pulse.",
+        averageWaitTime: null,
+        deltaFromNormal: null,
+        sampleSize: 0
+      },
+      restaurants: [],
+      facilities: [],
       lands: []
     };
   }
@@ -150,6 +246,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
             ws.status,
             ws.is_open AS isOpen,
             ws.source_updated_at AS lastUpdated,
+            a.latitude,
+            a.longitude,
             previous.wait_time AS trendWaitTime,
             previous.is_open AS previousIsOpen,
             (
@@ -203,6 +301,8 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         trendWaitTime: number | null;
         previousIsOpen: number | null;
         normalWaitTime: number | null;
+        latitude: number | null;
+        longitude: number | null;
       }>;
 
     const grouped = new Map<string, LandGroup>();
@@ -220,9 +320,32 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         trendMinutes:
           ride.waitTime === null || ride.trendWaitTime === null ? null : ride.waitTime - ride.trendWaitTime,
         normalWaitTime: ride.normalWaitTime,
-        previousIsOpen: ride.previousIsOpen === null ? null : Boolean(ride.previousIsOpen)
+        previousIsOpen: ride.previousIsOpen === null ? null : Boolean(ride.previousIsOpen),
+        latitude: ride.latitude,
+        longitude: ride.longitude
       });
     }
+
+    const restaurants = database
+      .prepare(
+        `
+          SELECT id, name, latitude, longitude
+          FROM restaurants
+          WHERE park_slug = ?
+          ORDER BY name
+        `
+      )
+      .all(park.slug) as RestaurantItem[];
+    const facilities = database
+      .prepare(
+        `
+          SELECT id, name, category, latitude, longitude
+          FROM facilities
+          WHERE park_slug = ?
+          ORDER BY category, name
+        `
+      )
+      .all(park.slug) as FacilityItem[];
 
     const hasData =
       rides.length > 0 || hours.length > 0 || featuredShows.length > 0 || meetGreets.length > 0;
@@ -246,6 +369,9 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       hours,
       featuredShows,
       meetGreets,
+      crowdPulse: buildCrowdPulse(rides),
+      restaurants,
+      facilities,
       lands: Array.from(grouped.values())
     };
   } catch {
@@ -265,7 +391,51 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       hours: [],
       featuredShows: [],
       meetGreets: [],
+      crowdPulse: {
+        level: "building",
+        headline: "Building baseline",
+        detail: "Not enough live ride data yet to read the park pulse.",
+        averageWaitTime: null,
+        deltaFromNormal: null,
+        sampleSize: 0
+      },
+      restaurants: [],
+      facilities: [],
       lands: []
     };
   }
+}
+
+export function getRideHistory(rideId: string): RideHistoryResponse | null {
+  const database = connect();
+  if (!database) return null;
+
+  const ride = database
+    .prepare("SELECT id FROM attractions WHERE id = ? AND category = 'ride'")
+    .get(rideId) as { id: string } | undefined;
+  if (!ride) return null;
+
+  const points = database
+    .prepare(
+      `
+        SELECT
+          captured_at AS capturedAt,
+          wait_time AS waitTime,
+          is_open AS isOpen
+        FROM wait_snapshots
+        WHERE attraction_id = ?
+          AND datetime(captured_at) >= datetime('now', '-12 hours')
+        ORDER BY datetime(captured_at)
+      `
+    )
+    .all(rideId) as Array<{ capturedAt: string; waitTime: number | null; isOpen: number }>;
+
+  return {
+    rideId,
+    points: points.map((point) => ({
+      capturedAt: point.capturedAt,
+      waitTime: point.waitTime,
+      isOpen: Boolean(point.isOpen)
+    }))
+  };
 }
