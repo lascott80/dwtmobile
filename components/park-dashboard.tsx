@@ -31,6 +31,7 @@ type WeatherResponse = {
   current?: { temperature_2m?: number; precipitation?: number; weather_code?: number };
   hourly?: { time?: string[]; precipitation_probability?: number[]; precipitation?: number[] };
 };
+type RidePrediction = ReturnType<typeof predictionForRide>;
 type PartyDay = { name: string; sharedAt: string };
 type PlanItem = {
   id: string;
@@ -156,6 +157,14 @@ function formatRelative(value: string | null) {
   }).format(date);
 }
 
+function formatFreshness(value: string | null) {
+  if (!value) return "No sync yet";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return "Updated now";
+  if (minutes < 60) return `Updated ${minutes}m ago`;
+  return formatRelative(value);
+}
+
 function timeInputValue(date: Date) {
   const hours = String(date.getHours()).padStart(2, "0");
   const minutes = String(date.getMinutes()).padStart(2, "0");
@@ -223,6 +232,13 @@ function comparedWithNormalLabel(ride: RideItem) {
   return `${Math.abs(delta)} min ${delta < 0 ? "below" : "above"} normal`;
 }
 
+function compactNormalLabel(ride: RideItem) {
+  if (ride.waitTime === null || ride.normalWaitTime === null) return null;
+  const delta = ride.waitTime - ride.normalWaitTime;
+  if (Math.abs(delta) < 5) return "near normal";
+  return `${Math.abs(delta)}m ${delta < 0 ? "under" : "over"} usual`;
+}
+
 function predictionForRide(ride: RideItem, points: RideHistoryPoint[] = []) {
   if (!ride.isOpen) {
     return { headline: "Closed", detail: statusLabel(ride), tone: "closed" };
@@ -259,8 +275,28 @@ function predictionForRide(ride: RideItem, points: RideHistoryPoint[] = []) {
   return { headline: "Watch", detail: "No strong signal yet. Save an alert if this is a must-do.", tone: "watch" };
 }
 
-function recommendationClass(ride: RideItem) {
-  return `recommendation-chip recommendation-${predictionForRide(ride).tone}`;
+function recommendationClass(prediction: RidePrediction) {
+  return `recommendation-chip recommendation-${prediction.tone}`;
+}
+
+function parkThemeClass(slug: string) {
+  if (slug.includes("epcot")) return "park-theme-epcot";
+  if (slug.includes("hollywood")) return "park-theme-hollywood";
+  if (slug.includes("animal")) return "park-theme-animal";
+  return "park-theme-magic";
+}
+
+function modeIcon(mode: DashboardMode) {
+  if (mode === "today") return "◒";
+  if (mode === "map") return "⌖";
+  if (mode === "my-day") return "✓";
+  return "≋";
+}
+
+function rideVisualClass(ride: RideItem, prediction: RidePrediction) {
+  const tone = waitTone(ride).replace("tone-", "");
+  const recommendation = prediction.tone;
+  return `ride-tone-${tone} ride-rec-${recommendation}`;
 }
 
 function isLikelyHeadliner(name: string) {
@@ -420,6 +456,7 @@ export function ParkDashboard() {
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [weather, setWeather] = useState<WeatherResponse | null>(null);
   const [sharingRecap, setSharingRecap] = useState(false);
+  const [showWhyThis, setShowWhyThis] = useState(false);
   const previousRidesRef = useRef<Map<string, RideItem>>(new Map());
   const favoritesRef = useRef<string[]>([]);
   const alertThresholdsRef = useRef<Record<string, number>>({});
@@ -462,7 +499,6 @@ export function ParkDashboard() {
         // Ignore corrupted localStorage data.
       }
     }
-    setShowOnboarding(window.localStorage.getItem(ONBOARDING_KEY) !== "true");
     const rawDayState = window.localStorage.getItem(DAY_STATE_KEY);
     if (rawDayState) {
       try {
@@ -519,6 +555,19 @@ export function ParkDashboard() {
     const rawSyncCode = window.localStorage.getItem(SYNC_CODE_KEY);
     if (rawSyncCode) setSyncCode(rawSyncCode);
     setPushAlertsEnabled(window.localStorage.getItem(PUSH_ALERTS_KEY) === "true");
+    const hasExistingPreferences = Boolean(
+      window.localStorage.getItem(FAVORITES_KEY) ||
+        rawAlerts ||
+        rawDayState ||
+        rawSnipes ||
+        rawParty ||
+        rawPlanItems ||
+        rawNoGo ||
+        rawProfile ||
+        rawTripMemory ||
+        rawSyncCode
+    );
+    setShowOnboarding(window.localStorage.getItem(ONBOARDING_KEY) !== "true" && !hasExistingPreferences);
     const restoreCode = new URLSearchParams(window.location.search).get("sync");
     if (restoreCode) {
       void restorePreferenceSync(restoreCode).then((restored) => {
@@ -706,6 +755,7 @@ export function ParkDashboard() {
   }, [selectedRide]);
 
   function toggleFavorite(attractionId: string) {
+    completeOnboarding();
     setFavorites((current) => {
       const next = current.includes(attractionId)
         ? current.filter((id) => id !== attractionId)
@@ -717,6 +767,7 @@ export function ParkDashboard() {
   }
 
   function openRideDetails(ride: RideItem) {
+    completeOnboarding();
     setSelectedRide(ride);
     setRideHistory([]);
     void fetch(`/api/rides/${ride.id}/history`)
@@ -858,19 +909,25 @@ export function ParkDashboard() {
     }
   }
 
-  function dismissOnboarding() {
+  function completeOnboarding() {
     window.localStorage.setItem(ONBOARDING_KEY, "true");
     setShowOnboarding(false);
   }
 
+  function dismissOnboarding() {
+    completeOnboarding();
+  }
+
   async function installApp() {
     if (!installPrompt) return;
+    completeOnboarding();
     await installPrompt.prompt();
     await installPrompt.userChoice;
     setInstallPrompt(null);
   }
 
   async function enableAlert(rideId: string, threshold = 30) {
+    completeOnboarding();
     if ("Notification" in window && Notification.permission === "default") {
       await Notification.requestPermission();
     }
@@ -919,6 +976,7 @@ export function ParkDashboard() {
   }
 
   function setRideDayState(rideId: string, state: "must-do" | "done" | "skip") {
+    completeOnboarding();
     setDayState((current) => {
       const next = { ...current, [rideId]: state };
       window.localStorage.setItem(DAY_STATE_KEY, JSON.stringify(next));
@@ -1125,6 +1183,25 @@ export function ParkDashboard() {
   }, [favorites, favoritesOnly, parkData, rideSort, searchQuery]);
 
   const allRides = useMemo(() => parkData?.lands.flatMap((land) => land.rides) ?? [], [parkData]);
+  const openRides = useMemo(() => allRides.filter((ride) => ride.isOpen), [allRides]);
+  const shortWaitRides = useMemo(
+    () => openRides.filter((ride) => ride.waitTime !== null && ride.waitTime <= 20),
+    [openRides]
+  );
+  const visibleWaits = useMemo(
+    () => openRides.map((ride) => ride.waitTime).filter((waitTime): waitTime is number => waitTime !== null),
+    [openRides]
+  );
+  const medianWait = useMemo(() => {
+    if (visibleWaits.length === 0) return null;
+    const sorted = [...visibleWaits].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }, [visibleWaits]);
+  const ridePredictions = useMemo(
+    () => new Map(allRides.map((ride) => [ride.id, predictionForRide(ride)])),
+    [allRides]
+  );
+  const getRidePrediction = (ride: RideItem) => ridePredictions.get(ride.id) ?? predictionForRide(ride);
   const favoriteRides = useMemo(
     () =>
       allRides
@@ -1232,16 +1309,73 @@ export function ParkDashboard() {
       rainLikely && isLikelyIndoor(top.ride.name) ? "rain-friendly" : null,
       top.ride.waitTime !== null && top.ride.waitTime <= 20 ? "short wait" : null
     ].filter(Boolean);
+    const why = [
+      top.advantage >= 10
+        ? { label: "Below usual", detail: `${top.advantage} min better than this ride's same-hour baseline.` }
+        : null,
+      top.ride.waitTime !== null && top.ride.waitTime <= 20
+        ? { label: "Easy fit", detail: `${top.ride.waitTime} min is short enough to act on without much planning.` }
+        : null,
+      favorites.includes(top.ride.id)
+        ? { label: "Saved by you", detail: "This ride is in your favorites, so it gets extra priority." }
+        : null,
+      dayState[top.ride.id] === "must-do"
+        ? { label: "Must-do", detail: "You marked this as a priority for today." }
+        : null,
+      rainLikely && isLikelyIndoor(top.ride.name)
+        ? { label: "Weather fit", detail: "Rain risk is elevated and this looks like an indoor-friendly option." }
+        : null,
+      top.ride.trendMinutes !== null && top.ride.trendMinutes < 0
+        ? { label: "Trending down", detail: `Posted wait is down ${Math.abs(top.ride.trendMinutes)} min vs an hour ago.` }
+        : null,
+      { label: "Enough signal", detail: `${openRides.length} open rides are reporting, so the comparison is useful.` }
+    ].filter((item): item is { label: string; detail: string } => Boolean(item));
     return {
       ride: top.ride,
       headline: `Go to ${top.ride.name}`,
       detail: `${minutesLabel(top.ride.waitTime, top.ride.isOpen)}${reasons.length ? ` · ${reasons.join(" · ")}` : ""}`,
-      rainLikely
+      rainLikely,
+      why
     };
-  }, [allRides, dayState, favorites, noGoRideIds, preferenceProfile, tripMemory, weather]);
-  const mappedRides = useMemo(() => allRides.filter((ride) => ride.latitude !== null && ride.longitude !== null), [allRides]);
+  }, [allRides, dayState, favorites, noGoRideIds, openRides.length, preferenceProfile, tripMemory, weather]);
+  const decisionBrief = useMemo(() => {
+    if (!parkData) return [];
+    return [
+      {
+        label: "Freshness",
+        value: formatFreshness(parkData.status.lastSuccessAt),
+        tone: parkData.status.stale ? "warning" : "good"
+      },
+      {
+        label: "Weather",
+        value: weatherDecisionLabel(weather),
+        tone: nextHourRainChance(weather) >= 40 ? "warning" : "neutral"
+      },
+      {
+        label: "Ride supply",
+        value: `${openRides.length}/${allRides.length} open`,
+        tone: openRides.length > 0 ? "good" : "warning"
+      }
+    ];
+  }, [allRides.length, openRides.length, parkData, weather]);
+  const mappedRides = useMemo(
+    () => (dashboardMode === "map" ? allRides.filter((ride) => ride.latitude !== null && ride.longitude !== null) : []),
+    [allRides, dashboardMode]
+  );
+  const usefulMapRides = useMemo(() => {
+    const useful = mappedRides.filter((ride) => {
+      const prediction = ridePredictions.get(ride.id) ?? predictionForRide(ride);
+      return (
+        isRecommendableRide(ride, noGoRideIds) &&
+        ride.isOpen &&
+        ride.waitTime !== null &&
+        (prediction.tone === "now" || ride.waitTime <= 25 || favorites.includes(ride.id))
+      );
+    });
+    return filterMapOutliers(useful.length >= 3 ? useful : mappedRides.filter((ride) => ride.isOpen).slice(0, 12));
+  }, [favorites, mappedRides, noGoRideIds, ridePredictions]);
   const nearbyRides = useMemo(() => {
-    if (!userLocation) return [];
+    if (dashboardMode !== "map" || !userLocation) return [];
     return mappedRides
       .map((ride) => ({
         ride,
@@ -1249,7 +1383,7 @@ export function ParkDashboard() {
       }))
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 5);
-  }, [mappedRides, userLocation]);
+  }, [dashboardMode, mappedRides, userLocation]);
   const partyFilteredRides = useMemo(() => {
     if (partyFilter === "open") return allRides.filter((ride) => ride.isOpen);
     if (partyFilter === "favorites") return allRides.filter((ride) => favorites.includes(ride.id));
@@ -1285,7 +1419,7 @@ export function ParkDashboard() {
     () =>
       allRides
         .filter((ride) => isRecommendableRide(ride, noGoRideIds) && ride.isOpen && ride.waitTime !== null)
-        .map((ride) => ({ ride, prediction: predictionForRide(ride) }))
+        .map((ride) => ({ ride, prediction: ridePredictions.get(ride.id) ?? predictionForRide(ride) }))
         .filter(({ prediction }) => prediction.tone === "now" || prediction.tone === "later")
         .sort((a, b) => {
           const aScore = a.prediction.tone === "now" ? 0 : 1;
@@ -1293,7 +1427,7 @@ export function ParkDashboard() {
           return aScore - bScore || (a.ride.waitTime ?? 999) - (b.ride.waitTime ?? 999);
         })
         .slice(0, 4),
-    [allRides, noGoRideIds]
+    [allRides, noGoRideIds, ridePredictions]
   );
   const upcomingPlanItems = useMemo(
     () =>
@@ -1409,8 +1543,10 @@ export function ParkDashboard() {
     }
   }
 
+  const selectedRidePrediction = selectedRide ? predictionForRide(selectedRide, rideHistory) : null;
+
   return (
-    <main className="shell" ref={shellRef}>
+    <main className={`shell mode-${dashboardMode} ${parkThemeClass(activePark)}`} ref={shellRef}>
       <header className="app-bar">
         <div>
           <span>Disney Wait Times</span>
@@ -1432,6 +1568,7 @@ export function ParkDashboard() {
             key={park.slug}
             className={park.slug === activePark ? "park-tab active" : "park-tab"}
             onClick={() => {
+              completeOnboarding();
               setActivePark(park.slug);
               trackEvent("park_view", park.slug);
             }}
@@ -1470,29 +1607,35 @@ export function ParkDashboard() {
           )}
 
           {parkData.status.stale && parkData.status.hasData && (
-            <section className="panel">
-              <div className="notice state-card">
-                <strong>Data may be stale</strong>
-                <p>This park hasn&apos;t refreshed in the last 20 minutes, so some waits may be out of date.</p>
-              </div>
+            <section className="panel compact-notice">
+              <details>
+                <summary>Data may be stale</summary>
+                <div className="details-body notice state-card">
+                  <p>This park hasn&apos;t refreshed in the last 20 minutes, so some waits may be out of date.</p>
+                </div>
+              </details>
             </section>
           )}
 
           {parkData.status.lastError && (
-            <section className="panel">
-              <div className="notice subtle state-card">
-                <strong>Polling note</strong>
-                <p>{parkData.status.lastError}</p>
-              </div>
+            <section className="panel compact-notice">
+              <details>
+                <summary>Polling note</summary>
+                <div className="details-body notice subtle state-card">
+                  <p>{parkData.status.lastError}</p>
+                </div>
+              </details>
             </section>
           )}
 
           {offlineMode && (
-            <section className="panel">
-              <div className="notice subtle state-card">
-                <strong>Offline cache in use</strong>
-                <p>You&apos;re viewing the last saved park snapshot until a fresh connection returns.</p>
-              </div>
+            <section className="panel compact-notice">
+              <details>
+                <summary>Offline cache in use</summary>
+                <div className="details-body notice subtle state-card">
+                  <p>You&apos;re viewing the last saved park snapshot until a fresh connection returns.</p>
+                </div>
+              </details>
             </section>
           )}
 
@@ -1502,7 +1645,15 @@ export function ParkDashboard() {
                 <p>Today in {parkData.park.shortName}</p>
                 <strong>{parkData.crowdPulse.headline}</strong>
               </div>
-              <span>{parkData.crowdPulse.averageWaitTime !== null ? `${parkData.crowdPulse.averageWaitTime}m avg` : "Learning"}</span>
+              <span>{medianWait !== null ? `${medianWait}m median` : parkData.crowdPulse.averageWaitTime !== null ? `${parkData.crowdPulse.averageWaitTime}m avg` : "Learning"}</span>
+            </div>
+            <div className="decision-brief" aria-label="Current park confidence signals">
+              {decisionBrief.map((item) => (
+                <article className={`decision-chip decision-${item.tone}`} key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </article>
+              ))}
             </div>
             {parkCopilot ? (
               <button
@@ -1516,12 +1667,57 @@ export function ParkDashboard() {
                 <span>{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
                 <strong>{parkCopilot.headline}</strong>
                 <small>{parkCopilot.detail}</small>
+                <div className="command-reason">
+                  <em>{shortWaitRides.length} rides at 20 min or less</em>
+                  <i aria-hidden="true" />
+                </div>
               </button>
             ) : (
               <div className="command-primary static">
                 <span>Next move</span>
                 <strong>Building recommendations</strong>
                 <small>{parkData.crowdPulse.detail}</small>
+                <div className="command-reason">
+                  <em>{openRides.length} open rides in view</em>
+                  <i aria-hidden="true" />
+                </div>
+              </div>
+            )}
+            {parkCopilot && (
+              <div className="command-actions" aria-label="Quick actions for next move">
+                <button onClick={() => setRideDayState(parkCopilot.ride.id, "done")} type="button">
+                  Done
+                </button>
+                <button onClick={() => setRideDayState(parkCopilot.ride.id, "skip")} type="button">
+                  Skip
+                </button>
+                <button onClick={() => enableAlert(parkCopilot.ride.id)} type="button">
+                  {alertThresholds[parkCopilot.ride.id] ? "Alert on" : "Alert"}
+                </button>
+                <button onClick={() => openRideDetails(parkCopilot.ride)} type="button">
+                  Details
+                </button>
+              </div>
+            )}
+            {parkCopilot && (
+              <div className="why-this">
+                <button
+                  aria-expanded={showWhyThis}
+                  onClick={() => setShowWhyThis((current) => !current)}
+                  type="button"
+                >
+                  Why this recommendation?
+                </button>
+                {showWhyThis && (
+                  <div className="why-this-panel">
+                    {parkCopilot.why.map((reason) => (
+                      <article key={reason.label}>
+                        <strong>{reason.label}</strong>
+                        <span>{reason.detail}</span>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             <div className="command-grid">
@@ -1560,11 +1756,14 @@ export function ParkDashboard() {
               <button
                 className={dashboardMode === mode ? "active" : ""}
                 key={mode}
-                onClick={() => setDashboardMode(mode)}
+                onClick={() => {
+                  completeOnboarding();
+                  setDashboardMode(mode);
+                }}
                 type="button"
               >
                 <span aria-hidden="true" className="mode-icon">
-                  {mode === "today" ? "T" : mode === "map" ? "M" : mode === "my-day" ? "D" : "R"}
+                  {modeIcon(mode)}
                 </span>
                 <span>{mode === "my-day" ? "My Day" : mode[0].toUpperCase() + mode.slice(1)}</span>
               </button>
@@ -1587,25 +1786,21 @@ export function ParkDashboard() {
                   ))}
                 </section>
               )}
-              <section className="panel">
+              {parkData.hours.length > 0 && <section className="panel">
                 <details>
                   <summary>Park Hours Today</summary>
                   <div className="details-body">
-                    {parkData.hours.length === 0 ? (
-                      <p className="muted">Hours are unavailable right now.</p>
-                    ) : (
-                      <div className="hour-list">
-                        {parkData.hours.map((entry) => (
-                          <article className="hour-chip" key={`${entry.type}-${entry.openingTime}`}>
-                            <strong>{entry.description ?? entry.type.replaceAll("_", " ")}</strong>
-                            <span>{formatHourRange(entry.openingTime, entry.closingTime)}</span>
-                          </article>
-                        ))}
-                      </div>
-                    )}
+                    <div className="hour-list">
+                      {parkData.hours.map((entry) => (
+                        <article className="hour-chip" key={`${entry.type}-${entry.openingTime}`}>
+                          <strong>{entry.description ?? entry.type.replaceAll("_", " ")}</strong>
+                          <span>{formatHourRange(entry.openingTime, entry.closingTime)}</span>
+                        </article>
+                      ))}
+                    </div>
                   </div>
                 </details>
-              </section>
+              </section>}
               {parkData.featuredShows.length > 0 && (
                 <section className="panel">
                   <details>
@@ -1739,15 +1934,18 @@ export function ParkDashboard() {
                 <strong>{personalChanges.length || timelineItems.length}</strong>
               </div>
               {personalChanges.length > 0 ? (
-                personalChanges.map((ride) => (
-                  <button className="agenda-row" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
-                    <div>
-                      <strong>{ride.name}</strong>
-                      <span>{changeLabel(ride)}</span>
-                    </div>
-                    <span className={recommendationClass(ride)}>{predictionForRide(ride).headline}</span>
-                  </button>
-                ))
+                personalChanges.map((ride) => {
+                  const prediction = getRidePrediction(ride);
+                  return (
+                    <button className="agenda-row" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                      <div>
+                        <strong>{ride.name}</strong>
+                        <span>{changeLabel(ride)}</span>
+                      </div>
+                      <span className={recommendationClass(prediction)}>{prediction.headline}</span>
+                    </button>
+                  );
+                })
               ) : timelineItems.length > 0 ? (
                 timelineItems.slice(0, 3).map((item) => (
                   <div className="agenda-row" key={item.key}>
@@ -1779,7 +1977,11 @@ export function ParkDashboard() {
                 <button onClick={requestNearbyMode} type="button">Nearby</button>
               </div>
             </div>
-            <ParkMap rides={mappedRides} />
+            <ParkMap
+              onRideSelect={openRideDetails}
+              predictions={ridePredictions}
+              rides={usefulMapRides}
+            />
             {parkMode === "nearby" && (
               <div className="nearby-list">
                 {nearbyRides.length > 0 ? nearbyRides.map(({ ride, distance }) => (
@@ -1831,22 +2033,18 @@ export function ParkDashboard() {
             </div>
           </section>}
 
-          {dashboardMode === "today" && <section className="panel">
+          {dashboardMode === "today" && parkData.meetGreets.length > 0 && <section className="panel">
             <details>
               <summary>Character Meet &amp; Greet Times</summary>
               <div className="details-body">
-                {parkData.meetGreets.length === 0 ? (
-                  <p className="muted">No character meeting times are posted right now.</p>
-                ) : (
-                  <div className="show-grid">
-                    {parkData.meetGreets.map((show) => (
-                      <article className="show-card" key={`${show.id}-${show.startTime}`}>
-                        <strong>{show.name}</strong>
-                        <span>{formatHourRange(show.startTime, show.endTime ?? show.startTime)}</span>
-                      </article>
-                    ))}
-                  </div>
-                )}
+                <div className="show-grid">
+                  {parkData.meetGreets.map((show) => (
+                    <article className="show-card" key={`${show.id}-${show.startTime}`}>
+                      <strong>{show.name}</strong>
+                      <span>{formatHourRange(show.startTime, show.endTime ?? show.startTime)}</span>
+                    </article>
+                  ))}
+                </div>
               </div>
             </details>
           </section>}
@@ -2027,8 +2225,12 @@ export function ParkDashboard() {
                     <div className="ride-list">
                       {land.rides.map((ride) => {
                         const favorite = favorites.includes(ride.id);
+                        const prediction = getRidePrediction(ride);
                         return (
-                          <article className={favorite ? "ride-row favorite-row" : "ride-row"} key={ride.id}>
+                          <article
+                            className={`${favorite ? "ride-row favorite-row" : "ride-row"} ${changeLabel(ride) ? "ride-live-change" : ""} ${rideVisualClass(ride, prediction)}`}
+                            key={ride.id}
+                          >
                             <button
                               aria-label={favorite ? "Remove favorite" : "Add favorite"}
                               className={favorite ? "favorite ride-favorite active" : "favorite ride-favorite"}
@@ -2051,7 +2253,11 @@ export function ParkDashboard() {
                               <div className="ride-copy">
                                 <div className="ride-text">
                                   <strong>{ride.name}</strong>
-                                  <span className={recommendationClass(ride)}>{predictionForRide(ride).headline}</span>
+                                  <div className="ride-intel">
+                                    <span className={recommendationClass(prediction)}>{prediction.headline}</span>
+                                    {compactNormalLabel(ride) && <small>{compactNormalLabel(ride)}</small>}
+                                    {changeLabel(ride) && <small>{changeLabel(ride)}</small>}
+                                  </div>
                                 </div>
                               </div>
                               <div className="ride-side">
@@ -2101,16 +2307,15 @@ export function ParkDashboard() {
               </button>
             </div>
 
-            <section className={`prediction-card sheet-prediction prediction-${predictionForRide(selectedRide, rideHistory).tone}`}>
-              <span>Should we go?</span>
-              <strong>{predictionForRide(selectedRide, rideHistory).headline}</strong>
-              <p>{predictionForRide(selectedRide, rideHistory).detail}</p>
-            </section>
-
-            <div className="sheet-meta">
+            <section className={`sheet-summary prediction-${selectedRidePrediction?.tone ?? "watch"}`}>
               <div className={`wait-pill ${pillVariant(selectedRide)} ${waitTone(selectedRide)}`}>
                 <span aria-hidden="true">{waitCue(selectedRide)}</span>
                 {minutesLabel(selectedRide.waitTime, selectedRide.isOpen) ?? statusLabel(selectedRide)}
+              </div>
+              <div>
+                <span>Should we go?</span>
+                <strong>{selectedRidePrediction?.headline}</strong>
+                <p>{selectedRidePrediction?.detail}</p>
               </div>
               <button
                 className={favorites.includes(selectedRide.id) ? "sheet-favorite active" : "sheet-favorite"}
@@ -2119,7 +2324,7 @@ export function ParkDashboard() {
               >
                 {favorites.includes(selectedRide.id) ? "★ Favorited" : "☆ Add favorite"}
               </button>
-            </div>
+            </section>
 
             <div className="sheet-alert-row">
               {alertThresholds[selectedRide.id] ? (
@@ -2187,7 +2392,7 @@ export function ParkDashboard() {
                 <span>Today&apos;s wait history</span>
                 <strong>{rideHistory.length > 1 ? `${rideHistory.length} samples` : "Building"}</strong>
               </div>
-              <RideHistoryChart points={rideHistory} />
+              <RideHistoryChart normalWaitTime={selectedRide.normalWaitTime} points={rideHistory} />
             </section>
             <section className="official-links">
               <span>Official Disney</span>
@@ -2202,23 +2407,52 @@ export function ParkDashboard() {
   );
 }
 
-function RideHistoryChart({ points }: { points: RideHistoryPoint[] }) {
+function RideHistoryChart({ normalWaitTime, points }: { normalWaitTime: number | null; points: RideHistoryPoint[] }) {
   const usable = points.filter((point) => point.waitTime !== null);
   if (usable.length < 2) {
     return <p className="muted">More samples are needed before a trend line appears.</p>;
   }
-  const maxWait = Math.max(...usable.map((point) => point.waitTime as number), 1);
+  const waits = usable.map((point) => point.waitTime as number);
+  const maxWait = Math.max(...waits, normalWaitTime ?? 0, 1);
+  const minWait = Math.min(...waits, normalWaitTime ?? maxWait, 0);
+  const range = Math.max(1, maxWait - minWait);
+  const chartLeft = 18;
+  const chartRight = 284;
+  const chartTop = 16;
+  const chartBottom = 72;
+  const chartWidth = chartRight - chartLeft;
+  const chartY = (waitTime: number) => chartBottom - ((waitTime - minWait) / range) * (chartBottom - chartTop);
   const polyline = usable
     .map((point, index) => {
-      const x = (index / Math.max(usable.length - 1, 1)) * 100;
-      const y = 44 - ((point.waitTime as number) / maxWait) * 36;
+      const x = chartLeft + (index / Math.max(usable.length - 1, 1)) * chartWidth;
+      const y = chartY(point.waitTime as number);
       return `${x},${y}`;
     })
     .join(" ");
+  const current = usable[usable.length - 1];
+  const currentX = chartRight;
+  const currentY = chartY(current.waitTime as number);
+  const normalY = normalWaitTime === null ? null : chartY(normalWaitTime);
+  const lowWait = Math.min(...waits);
+  const highWait = Math.max(...waits);
 
   return (
-    <svg aria-label="Ride wait history chart" className="history-chart" role="img" viewBox="0 0 100 48">
+    <svg aria-label="Ride wait history chart" className="history-chart" role="img" viewBox="0 0 300 96">
+      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={chartTop} y2={chartTop} />
+      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={(chartTop + chartBottom) / 2} y2={(chartTop + chartBottom) / 2} />
+      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={chartBottom} y2={chartBottom} />
+      {normalY !== null && (
+        <>
+          <line className="history-normal" x1={chartLeft} x2={chartRight} y1={normalY} y2={normalY} />
+          <text className="history-label history-label-end" x={chartRight} y={Math.max(12, normalY - 4)}>normal {normalWaitTime}m</text>
+        </>
+      )}
       <polyline points={polyline} />
+      <circle className="history-current" cx={currentX} cy={currentY} r="4" />
+      <text className="history-label" x={chartLeft} y="90">1h ago</text>
+      <text className="history-label history-label-end" x={chartRight} y="90">now</text>
+      <text className="history-label" x={chartLeft} y="12">high {highWait}m</text>
+      <text className="history-label" x={chartLeft} y="68">low {lowWait}m</text>
     </svg>
   );
 }
@@ -2234,12 +2468,41 @@ function distanceMiles(lat1: number, lon1: number, lat2: number, lon2: number) {
   return 2 * radius * Math.asin(Math.sqrt(a));
 }
 
+function median(values: number[]) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function filterMapOutliers(rides: RideItem[]) {
+  if (rides.length < 4) return rides;
+  const centerLat = median(rides.map((ride) => ride.latitude).filter((value): value is number => value !== null));
+  const centerLon = median(rides.map((ride) => ride.longitude).filter((value): value is number => value !== null));
+  if (centerLat === null || centerLon === null) return rides;
+  const nearby = rides.filter(
+    (ride) =>
+      ride.latitude !== null &&
+      ride.longitude !== null &&
+      distanceMiles(centerLat, centerLon, ride.latitude, ride.longitude) <= 1.4
+  );
+  return nearby.length >= 3 ? nearby : rides;
+}
+
 function nextHourRainChance(weather: WeatherResponse | null) {
   const times = weather?.hourly?.time ?? [];
   const chances = weather?.hourly?.precipitation_probability ?? [];
   const now = Date.now();
   const index = times.findIndex((time) => new Date(time).getTime() >= now);
   return index >= 0 ? chances[index] ?? 0 : 0;
+}
+
+function weatherDecisionLabel(weather: WeatherResponse | null) {
+  const chance = nextHourRainChance(weather);
+  const temperature = weather?.current?.temperature_2m;
+  if (chance >= 50) return `${chance}% rain soon`;
+  if (chance >= 25) return `${chance}% rain watch`;
+  if (typeof temperature === "number") return `${Math.round(temperature)} deg now`;
+  return "Weather loading";
 }
 
 function isLikelyIndoor(name: string) {
@@ -2344,10 +2607,23 @@ function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, 
   ctx.fillText(line, x, currentY);
 }
 
-function ParkMap({ rides }: { rides: RideItem[] }) {
+function ParkMap({
+  onRideSelect,
+  predictions,
+  rides
+}: {
+  onRideSelect: (ride: RideItem) => void;
+  predictions: Map<string, RidePrediction>;
+  rides: RideItem[];
+}) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const leafletMapRef = useRef<import("leaflet").Map | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const ridesRef = useRef(rides);
+
+  useEffect(() => {
+    ridesRef.current = rides;
+  }, [rides]);
 
   useEffect(() => {
     if (!mapRef.current || rides.length === 0) return;
@@ -2373,16 +2649,27 @@ function ParkMap({ rides }: { rides: RideItem[] }) {
         const latLng = [ride.latitude as number, ride.longitude as number] as [number, number];
         bounds.extend(latLng);
         const waitText = minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride);
+        const prediction = predictions.get(ride.id) ?? predictionForRide(ride);
         L.marker(latLng, {
           icon: L.divIcon({
             className: "",
-            html: `<span class="map-bubble ${waitTone(ride)} recommendation-${predictionForRide(ride).tone}"><span aria-hidden="true">${waitCue(ride)}</span>${waitText}</span>`
+            html: `<button type="button" data-ride-id="${ride.id}" class="map-bubble ${waitTone(ride)} recommendation-${prediction.tone}"><span aria-hidden="true">${waitCue(ride)}</span><strong>${waitText}</strong></button>`
           })
         })
           .bindTooltip(ride.name)
           .addTo(map);
       }
-      map.fitBounds(bounds.pad(0.18));
+      map.fitBounds(bounds, {
+        maxZoom: expanded ? 17 : 16,
+        padding: expanded ? [42, 42] : [24, 24]
+      });
+      map.on("click", (event) => {
+        const target = event.originalEvent.target as HTMLElement | null;
+        const bubble = target?.closest?.("[data-ride-id]") as HTMLElement | null;
+        const rideId = bubble?.dataset.rideId;
+        const ride = ridesRef.current.find((item) => item.id === rideId);
+        if (ride) onRideSelect(ride);
+      });
     });
 
     return () => {
@@ -2390,10 +2677,23 @@ function ParkMap({ rides }: { rides: RideItem[] }) {
       leafletMapRef.current = null;
       map?.remove();
     };
-  }, [rides]);
+  }, [expanded, onRideSelect, predictions, rides]);
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => leafletMapRef.current?.invalidateSize(), 180);
+    const timeoutId = window.setTimeout(() => {
+      const map = leafletMapRef.current;
+      if (!map || ridesRef.current.length === 0) return;
+      map.invalidateSize();
+      const L = (window as unknown as { L?: typeof import("leaflet") }).L;
+      if (!L) return;
+      const bounds = L.latLngBounds(
+        ridesRef.current.map((ride) => [ride.latitude as number, ride.longitude as number] as [number, number])
+      );
+      map.fitBounds(bounds, {
+        maxZoom: expanded ? 17 : 16,
+        padding: expanded ? [42, 42] : [24, 24]
+      });
+    }, 180);
     return () => window.clearTimeout(timeoutId);
   }, [expanded]);
 

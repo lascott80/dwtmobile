@@ -24,6 +24,12 @@ python python-service/collector.py --once
 npm run dev
 ```
 
+## Runtime Configuration
+
+- `DISNEY_WAIT_TIMES_DB_PATH`: product data SQLite file written by the collector.
+- `DISNEY_WAIT_TIMES_METRICS_DB_PATH` or `APP_METRICS_DB_PATH`: app/runtime metrics SQLite file.
+- `DISNEY_WAIT_TIMES_ADMIN_TOKEN` or `DWT_ADMIN_TOKEN`: protects `/stats` in production. Use HTTP Basic auth with username `admin` and this value as the password, or send it as a bearer token.
+
 ## Architecture
 
 - `python-service/collector.py` polls the upstream services, normalizes data, and stores 60 days of snapshots.

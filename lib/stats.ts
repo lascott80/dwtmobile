@@ -1,9 +1,8 @@
 import { mkdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { DB_PATH, PARKS } from "@/lib/config";
+import { DB_PATH, METRICS_DB_PATH, PARKS } from "@/lib/config";
 
-const METRICS_DB_PATH = join(dirname(DB_PATH), "app_metrics.db");
 const HIDDEN_RIDE_NAMES = [
   "Maharajah Jungle Trek",
   "Beauty and the Beast Sing-Along",
@@ -21,6 +20,19 @@ const SOURCE_IMPACT: Record<string, string> = {
 };
 
 let metricsDb: DatabaseSync | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+const visitQueue: Array<{ visitorId: string; path: string; visitedAt: string }> = [];
+const eventQueue: Array<{ visitorId: string; eventName: string; detail: string | null; createdAt: string }> = [];
+const apiRequestQueue: Array<{
+  route: string;
+  method: string;
+  status: number;
+  durationMs: number;
+  createdAt: string;
+}> = [];
+const MAX_QUEUE_SIZE = 2_000;
+const FLUSH_DELAY_MS = 250;
 
 function connectMetrics() {
   if (!metricsDb) {
@@ -64,6 +76,67 @@ function connectMetrics() {
   return metricsDb;
 }
 
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushTelemetryQueues();
+  }, FLUSH_DELAY_MS);
+  flushTimer.unref?.();
+}
+
+function trimQueue<T>(queue: T[]) {
+  if (queue.length > MAX_QUEUE_SIZE) {
+    queue.splice(0, queue.length - MAX_QUEUE_SIZE);
+  }
+}
+
+function flushTelemetryQueues() {
+  const visits = visitQueue.splice(0);
+  const events = eventQueue.splice(0);
+  const apiRequests = apiRequestQueue.splice(0);
+
+  if (visits.length === 0 && events.length === 0 && apiRequests.length === 0) {
+    return;
+  }
+
+  try {
+    const database = connectMetrics();
+    const insertVisit = database.prepare("INSERT INTO visits (visitor_id, path, visited_at) VALUES (?, ?, ?)");
+    const insertEvent = database.prepare(
+      "INSERT INTO events (visitor_id, event_name, detail, created_at) VALUES (?, ?, ?, ?)"
+    );
+    const insertApiRequest = database.prepare(
+      "INSERT INTO api_requests (route, method, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?)"
+    );
+
+    database.exec("BEGIN");
+    try {
+      for (const visit of visits) {
+        insertVisit.run(visit.visitorId, visit.path, visit.visitedAt);
+      }
+      for (const event of events) {
+        insertEvent.run(event.visitorId, event.eventName, event.detail, event.createdAt);
+      }
+      for (const request of apiRequests) {
+        insertApiRequest.run(
+          request.route,
+          request.method,
+          request.status,
+          request.durationMs,
+          request.createdAt
+        );
+      }
+      database.exec("COMMIT");
+    } catch {
+      database.exec("ROLLBACK");
+      throw new Error("Could not flush telemetry queues");
+    }
+  } catch {
+    // Telemetry is best-effort; user-facing routes should not pay for storage failures.
+  }
+}
+
 function normalizeSyncCode(code: string) {
   return code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
 }
@@ -78,21 +151,21 @@ function generateSyncCode() {
 }
 
 export function recordVisit(visitorId: string, path: string) {
-  connectMetrics()
-    .prepare("INSERT INTO visits (visitor_id, path, visited_at) VALUES (?, ?, ?)")
-    .run(visitorId, path, new Date().toISOString());
+  visitQueue.push({ visitorId, path, visitedAt: new Date().toISOString() });
+  trimQueue(visitQueue);
+  scheduleFlush();
 }
 
 export function recordEvent(visitorId: string, eventName: string, detail: string | null) {
-  connectMetrics()
-    .prepare("INSERT INTO events (visitor_id, event_name, detail, created_at) VALUES (?, ?, ?, ?)")
-    .run(visitorId, eventName, detail, new Date().toISOString());
+  eventQueue.push({ visitorId, eventName, detail, createdAt: new Date().toISOString() });
+  trimQueue(eventQueue);
+  scheduleFlush();
 }
 
 export function recordApiRequest(route: string, method: string, status: number, durationMs: number) {
-  connectMetrics()
-    .prepare("INSERT INTO api_requests (route, method, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?)")
-    .run(route, method, status, durationMs, new Date().toISOString());
+  apiRequestQueue.push({ route, method, status, durationMs, createdAt: new Date().toISOString() });
+  trimQueue(apiRequestQueue);
+  scheduleFlush();
 }
 
 export async function withApiTelemetry(route: string, method: string, handler: () => Response | Promise<Response>) {
@@ -148,6 +221,7 @@ export function getPreferenceSync(code: string) {
 }
 
 export function getTrafficStats() {
+  flushTelemetryQueues();
   const database = connectMetrics();
   return database
     .prepare(
@@ -173,6 +247,7 @@ export function getTrafficStats() {
 }
 
 export function getUsageStats() {
+  flushTelemetryQueues();
   const database = connectMetrics();
   return {
     topParks: database
@@ -277,6 +352,25 @@ export function getUsageStats() {
       lastSeenAt: string;
     }>
   };
+}
+
+export function getMetricsStorageStats() {
+  flushTelemetryQueues();
+  try {
+    return {
+      databaseBytes: statSync(METRICS_DB_PATH).size,
+      queuedVisits: visitQueue.length,
+      queuedEvents: eventQueue.length,
+      queuedApiRequests: apiRequestQueue.length
+    };
+  } catch {
+    return {
+      databaseBytes: 0,
+      queuedVisits: visitQueue.length,
+      queuedEvents: eventQueue.length,
+      queuedApiRequests: apiRequestQueue.length
+    };
+  }
 }
 
 export function getStorageStats() {

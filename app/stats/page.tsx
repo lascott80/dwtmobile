@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { DB_PATH, PARKS } from "@/lib/config";
-import { getStorageStats, getTrafficStats, getUsageStats } from "@/lib/stats";
+import { getMetricsStorageStats, getStorageStats, getTrafficStats, getUsageStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +55,7 @@ export default function StatsPage() {
   const traffic = getTrafficStats();
   const usage = getUsageStats();
   const storage = existsSync(DB_PATH) ? getStorageStats() : null;
+  const metricsStorage = getMetricsStorageStats();
   const gitSha = getGitSha();
   const buildTime = process.env.BUILD_TIME || process.env.NEXT_PUBLIC_BUILD_TIME || new Date().toISOString();
   const allParksReporting = storage ? storage.health.parksWithData === storage.health.expectedParks : false;
@@ -175,8 +176,9 @@ export default function StatsPage() {
             <span>Build time <strong>{formatDate(buildTime)}</strong></span>
             <span>Process uptime <strong>{formatSeconds(Math.round(process.uptime()))}</strong></span>
             <span>Node env <strong>{process.env.NODE_ENV || "unknown"}</strong></span>
-            <span>DB footprint <strong>{formatBytes(storage?.storageFootprint.databaseBytes ?? 0)}</strong></span>
-            <span>DB path <strong>{DB_PATH}</strong></span>
+            <span>Product DB footprint <strong>{formatBytes(storage?.storageFootprint.databaseBytes ?? 0)}</strong></span>
+            <span>Metrics DB footprint <strong>{formatBytes(metricsStorage.databaseBytes)}</strong></span>
+            <span>Pending telemetry <strong>{formatNumber(metricsStorage.queuedVisits + metricsStorage.queuedEvents + metricsStorage.queuedApiRequests)}</strong></span>
           </div>
         </article>
       </section>

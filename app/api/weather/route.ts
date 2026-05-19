@@ -19,6 +19,10 @@ export async function GET(request: Request) {
     const response = await fetch(url, { next: { revalidate: 900 } });
     if (!response.ok) return NextResponse.json({ error: "Weather unavailable" }, { status: 502 });
     const data = await response.json();
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: {
+        "Cache-Control": "public, s-maxage=900, stale-while-revalidate=1800"
+      }
+    });
   });
 }

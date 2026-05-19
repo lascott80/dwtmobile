@@ -58,6 +58,20 @@ export const DB_PATH =
   process.env.DISNEY_WAIT_TIMES_DB_PATH ||
   `${process.cwd()}/python-service/data/disney_wait_times.db`;
 
+export const METRICS_DB_PATH =
+  process.env.DISNEY_WAIT_TIMES_METRICS_DB_PATH ||
+  process.env.APP_METRICS_DB_PATH ||
+  `${process.cwd()}/data/app_metrics.db`;
+
+export const ADMIN_TOKEN =
+  process.env.DISNEY_WAIT_TIMES_ADMIN_TOKEN ||
+  process.env.DWT_ADMIN_TOKEN ||
+  "";
+
+export const MAX_ANALYTICS_DETAIL_LENGTH = 160;
+export const MAX_ANALYTICS_NAME_LENGTH = 80;
+export const MAX_PREFERENCE_PAYLOAD_BYTES = 24 * 1024;
+
 export const QUEUE_TIMES_ATTRIBUTION = {
   label: "Powered by Queue-Times.com",
   href: "https://queue-times.com/"
