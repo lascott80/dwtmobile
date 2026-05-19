@@ -35,9 +35,29 @@ function connectMetrics() {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_events_name_time ON events (event_name, created_at);
+      CREATE TABLE IF NOT EXISTS preference_sync (
+        code TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_preference_sync_updated ON preference_sync (updated_at);
     `);
   }
   return metricsDb;
+}
+
+function normalizeSyncCode(code: string) {
+  return code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
+}
+
+function generateSyncCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let index = 0; index < 6; index += 1) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return code;
 }
 
 export function recordVisit(visitorId: string, path: string) {
@@ -50,6 +70,42 @@ export function recordEvent(visitorId: string, eventName: string, detail: string
   connectMetrics()
     .prepare("INSERT INTO events (visitor_id, event_name, detail, created_at) VALUES (?, ?, ?, ?)")
     .run(visitorId, eventName, detail, new Date().toISOString());
+}
+
+export function savePreferenceSync(payload: unknown, code?: string) {
+  const database = connectMetrics();
+  let syncCode = code ? normalizeSyncCode(code) : "";
+  let attempts = 0;
+  while (!syncCode || database.prepare("SELECT code FROM preference_sync WHERE code = ?").get(syncCode)) {
+    if (code && attempts === 0) break;
+    syncCode = generateSyncCode();
+    attempts += 1;
+  }
+  const now = new Date().toISOString();
+  database
+    .prepare(
+      `
+        INSERT INTO preference_sync (code, payload, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+      `
+    )
+    .run(syncCode, JSON.stringify(payload), now, now);
+  return syncCode;
+}
+
+export function getPreferenceSync(code: string) {
+  const syncCode = normalizeSyncCode(code);
+  if (!syncCode) return null;
+  const row = connectMetrics()
+    .prepare("SELECT code, payload, updated_at AS updatedAt FROM preference_sync WHERE code = ?")
+    .get(syncCode) as { code: string; payload: string; updatedAt: string } | undefined;
+  if (!row) return null;
+  return {
+    code: row.code,
+    payload: JSON.parse(row.payload) as unknown,
+    updatedAt: row.updatedAt
+  };
 }
 
 export function getTrafficStats() {

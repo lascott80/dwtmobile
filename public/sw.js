@@ -47,3 +47,22 @@ self.addEventListener("fetch", (event) => {
       .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/offline")))
   );
 });
+
+self.addEventListener("push", (event) => {
+  const payload = event.data?.json?.() ?? {};
+  const title = payload.title || "Disney Wait Times Mobile";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body || "A park-day alert is ready.",
+      icon: "/icon.svg",
+      badge: "/icon.svg",
+      data: payload.url || "/"
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = event.notification.data || "/";
+  event.waitUntil(clients.openWindow(url));
+});
