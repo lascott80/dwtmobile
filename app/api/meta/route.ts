@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getParkMeta } from "@/lib/db";
+import { withApiTelemetry } from "@/lib/stats";
 
 export function GET() {
-  return NextResponse.json(getParkMeta());
+  return withApiTelemetry("/api/meta", "GET", () => NextResponse.json(getParkMeta()));
 }
-

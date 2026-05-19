@@ -657,7 +657,7 @@ export function ParkDashboard() {
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       void fetchPark(activePark, true);
-    }, 60_000);
+    }, 30_000);
 
     return () => window.clearInterval(intervalId);
   }, [activePark]);
@@ -1505,7 +1505,14 @@ export function ParkDashboard() {
               <span>{parkData.crowdPulse.averageWaitTime !== null ? `${parkData.crowdPulse.averageWaitTime}m avg` : "Learning"}</span>
             </div>
             {parkCopilot ? (
-              <button className="command-primary" onClick={() => openRideDetails(parkCopilot.ride)} type="button">
+              <button
+                className="command-primary"
+                onClick={() => {
+                  trackEvent("copilot_open", parkCopilot.ride.id);
+                  openRideDetails(parkCopilot.ride);
+                }}
+                type="button"
+              >
                 <span>{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
                 <strong>{parkCopilot.headline}</strong>
                 <small>{parkCopilot.detail}</small>
@@ -1713,7 +1720,15 @@ export function ParkDashboard() {
                       <strong>{flow.landName}</strong>
                       <span>{flow.rides.map((ride) => ride.name).join(" -> ")}</span>
                     </div>
-                    <button onClick={() => openRideDetails(flow.rides[0])} type="button">Start</button>
+                    <button
+                      onClick={() => {
+                        trackEvent("land_flow_start", flow.landName);
+                        openRideDetails(flow.rides[0]);
+                      }}
+                      type="button"
+                    >
+                      Start
+                    </button>
                   </article>
                 ))}
               </div>
@@ -1872,7 +1887,15 @@ export function ParkDashboard() {
                 </div>
                 <div className="flow-grid">
                   {landFlowRecommendations.map((flow) => (
-                    <button className="flow-card" key={flow.landName} onClick={() => openRideDetails(flow.rides[0])} type="button">
+                    <button
+                      className="flow-card"
+                      key={flow.landName}
+                      onClick={() => {
+                        trackEvent("land_flow_start", flow.landName);
+                        openRideDetails(flow.rides[0]);
+                      }}
+                      type="button"
+                    >
                       <strong>{flow.landName}</strong>
                       <span>{flow.rides.map((ride) => ride.name).join(" -> ")}</span>
                     </button>

@@ -25,16 +25,38 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatAge(value: string | null | undefined) {
+  if (!value) return "No data";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+function formatSeconds(value: number) {
+  if (value < 60) return `${value}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
 function healthTone(ok: boolean) {
   return ok ? "healthy" : "warning";
+}
+
+function getGitSha() {
+  try {
+    return execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
+  } catch {
+    return process.env.GIT_SHA || "unknown";
+  }
 }
 
 export default function StatsPage() {
   const traffic = getTrafficStats();
   const usage = getUsageStats();
   const storage = existsSync(DB_PATH) ? getStorageStats() : null;
-  const gitSha = execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
-  const buildTime = new Date().toISOString();
+  const gitSha = getGitSha();
+  const buildTime = process.env.BUILD_TIME || process.env.NEXT_PUBLIC_BUILD_TIME || new Date().toISOString();
   const allParksReporting = storage ? storage.health.parksWithData === storage.health.expectedParks : false;
   const dataFresh = storage ? (storage.health.latestSnapshotAgeMinutes ?? Number.MAX_SAFE_INTEGER) <= 20 : false;
   const noCollectorErrors = storage ? storage.health.parksWithErrors === 0 : false;
@@ -48,8 +70,14 @@ export default function StatsPage() {
     ? [
         storage.health.staleParks > 0 ? `${storage.health.staleParks} park(s) stale` : null,
         storage.health.parksWithErrors > 0 ? `${storage.health.parksWithErrors} park(s) with collector errors` : null,
+        storage.sourceImpact.some((source) => source.source === "osm-overpass" && source.failuresLast24h > 0)
+          ? "OSM failing; facilities may be stale"
+          : null,
         storage.coverageQuality.ridesWithoutRecentData > 0
           ? `${storage.coverageQuality.ridesWithoutRecentData} rides without recent data`
+          : null,
+        storage.anomalies.zeroOpenDuringHours.length > 0
+          ? `${storage.anomalies.zeroOpenDuringHours.length} park(s) open with zero open rides`
           : null,
         storage.coverageQuality.ridesMissingLand > 0
           ? `${storage.coverageQuality.ridesMissingLand} rides missing land metadata`
@@ -109,6 +137,28 @@ export default function StatsPage() {
         <article><span>Days to full window</span><strong>{storage?.retention.daysUntilFullWindow ?? 60}</strong></article>
       </section>
 
+      <section className="noc-panel">
+        <div className="noc-panel-head"><h2>What Is Broken?</h2><span>Feature-level impact</span></div>
+        <div className="impact-grid">
+          <article className={healthTone(Boolean(storage && dataFresh && allParksReporting))}>
+            <strong>Ride waits</strong>
+            <span>{storage && dataFresh && allParksReporting ? "Healthy" : "Wait data may be stale or incomplete"}</span>
+          </article>
+          <article className={healthTone(Boolean(storage && storage.dataTypeFreshness.showtimes.rows > 0))}>
+            <strong>Shows and meetups</strong>
+            <span>{storage?.dataTypeFreshness.showtimes.rows ? `${formatAge(storage.dataTypeFreshness.showtimes.lastUpdatedAt)}` : "No showtime rows"}</span>
+          </article>
+          <article className={healthTone(Boolean(storage && storage.dataTypeFreshness.facilities.rows > 0))}>
+            <strong>Facilities</strong>
+            <span>{storage?.dataTypeFreshness.facilities.rows ? `${formatNumber(storage.dataTypeFreshness.facilities.rows)} rows, ${formatAge(storage.dataTypeFreshness.facilities.lastUpdatedAt)}` : "Missing OSM facilities"}</span>
+          </article>
+          <article className={healthTone(Boolean(storage && storage.health.parksWithErrors === 0))}>
+            <strong>Collector</strong>
+            <span>{storage?.health.parksWithErrors ? `${storage.health.parksWithErrors} parks reporting errors` : "No park-level errors"}</span>
+          </article>
+        </div>
+      </section>
+
       <section className="noc-columns">
         <article className="noc-panel">
           <div className="noc-panel-head"><h2>Collector SLA</h2><span>Expected vs observed</span></div>
@@ -123,8 +173,10 @@ export default function StatsPage() {
           <div className="mini-metrics">
             <span>Git SHA <strong>{gitSha}</strong></span>
             <span>Build time <strong>{formatDate(buildTime)}</strong></span>
+            <span>Process uptime <strong>{formatSeconds(Math.round(process.uptime()))}</strong></span>
+            <span>Node env <strong>{process.env.NODE_ENV || "unknown"}</strong></span>
             <span>DB footprint <strong>{formatBytes(storage?.storageFootprint.databaseBytes ?? 0)}</strong></span>
-            <span>Schema tables <strong>10</strong></span>
+            <span>DB path <strong>{DB_PATH}</strong></span>
           </div>
         </article>
       </section>
@@ -150,13 +202,13 @@ export default function StatsPage() {
 
       <section className="noc-columns">
         <article className="noc-panel">
-          <div className="noc-panel-head"><h2>API Source Health</h2></div>
+          <div className="noc-panel-head"><h2>Source Status With Impact</h2><span>Last 24 hours</span></div>
           <div className="source-list">
-            {storage?.sourceHealth.length ? storage.sourceHealth.map((source) => (
+            {storage?.sourceImpact.length ? storage.sourceImpact.map((source) => (
               <div key={source.source}>
                 <strong>{source.source}</strong>
-                <span>{formatDate(source.checkedAt)}</span>
-                <em className={source.success ? "healthy" : "warning"}>{source.success ? "Healthy" : "Failing"}</em>
+                <span>{source.impact} · {source.failureRate}% fail · last ok {formatAge(source.lastSuccessAt)}</span>
+                <em className={source.failuresLast24h ? "warning" : "healthy"}>{source.failuresLast24h ? "Degraded" : "Healthy"}</em>
               </div>
             )) : <p>No source checks recorded yet.</p>}
           </div>
@@ -195,6 +247,101 @@ export default function StatsPage() {
               </div>
             )) : <p>No recent source errors.</p>}
           </div>
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Freshness By Data Type</h2><span>Rows and age</span></div>
+          <div className="source-list">
+            {storage && Object.entries(storage.dataTypeFreshness).map(([kind, freshness]) => (
+              <div key={kind}>
+                <strong>{kind}</strong>
+                <span>{formatNumber(freshness.rows)} rows</span>
+                <em className={freshness.lastUpdatedAt ? "healthy" : "warning"}>{formatAge(freshness.lastUpdatedAt)}</em>
+              </div>
+            ))}
+          </div>
+        </article>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Facilities / OSM</h2><span>Restrooms, water, first aid</span></div>
+          <div className="source-list">
+            {storage?.facilitiesByPark.map((park) => (
+              <div key={park.slug}>
+                <strong>{park.shortName}</strong>
+                <span>{park.restrooms} restroom · {park.water} water · {park.firstAid} first aid</span>
+                <em className={park.total > 0 ? "healthy" : "warning"}>{park.total} total</em>
+              </div>
+            ))}
+          </div>
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Internal API Usage</h2><span>Last 24 hours</span></div>
+          <div className="source-list">
+            {usage.apiUsage.length ? usage.apiUsage.map((route) => (
+              <div key={route.route}>
+                <strong>{route.route}</strong>
+                <span>{formatNumber(route.requests)} req · {route.averageDurationMs ?? 0}ms avg</span>
+                <em className={route.errors ? "warning" : "healthy"}>{route.errors} errors</em>
+              </div>
+            )) : <p>No API telemetry yet.</p>}
+          </div>
+        </article>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Preference Sync</h2><span>Codes and payloads</span></div>
+          <div className="mini-metrics">
+            <span>Total codes <strong>{usage.preferenceSync.totalCodes}</strong></span>
+            <span>Created today <strong>{usage.preferenceSync.codesCreatedToday}</strong></span>
+            <span>Updated today <strong>{usage.preferenceSync.codesUpdatedToday}</strong></span>
+            <span>Last update <strong>{formatAge(usage.preferenceSync.lastUpdatedAt)}</strong></span>
+            <span>Avg payload <strong>{formatBytes(usage.preferenceSync.averagePayloadBytes ?? 0)}</strong></span>
+            <span>Max payload <strong>{formatBytes(usage.preferenceSync.maxPayloadBytes ?? 0)}</strong></span>
+          </div>
+        </article>
+      </section>
+
+      <section className="noc-columns">
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Recommendation Engagement</h2><span>Smart-feature events</span></div>
+          <div className="source-list">
+            {usage.recommendationEngagement.length ? usage.recommendationEngagement.map((event) => (
+              <div key={event.eventName}>
+                <strong>{event.eventName.replaceAll("_", " ")}</strong>
+                <span>recorded actions</span>
+                <em>{formatNumber(event.count)}</em>
+              </div>
+            )) : <p>No recommendation events yet.</p>}
+          </div>
+        </article>
+        <article className="noc-panel">
+          <div className="noc-panel-head"><h2>Advanced Anomalies</h2><span>Last 12 hours</span></div>
+          <div className="mini-metrics">
+            <span>Large wait swings <strong>{storage?.anomalies.impossibleWaitSwings.length ?? 0}</strong></span>
+            <span>Open parks with 0 rides <strong>{storage?.anomalies.zeroOpenDuringHours.length ?? 0}</strong></span>
+          </div>
+          {storage && storage.anomalies.impossibleWaitSwings.length > 0 && (
+            <div className="metadata-list">
+              {storage.anomalies.impossibleWaitSwings.map((ride) => (
+                <span key={`${ride.parkName}-${ride.name}-${ride.capturedAt}`}>
+                  <strong>{ride.name}</strong>
+                  {ride.parkName}: {ride.swing} min swing
+                </span>
+              ))}
+            </div>
+          )}
+          {storage && storage.anomalies.zeroOpenDuringHours.length > 0 && (
+            <div className="metadata-list">
+              {storage.anomalies.zeroOpenDuringHours.map((park) => (
+                <span key={park.slug}>
+                  <strong>{park.shortName}</strong>
+                  operating window with no open rides
+                </span>
+              ))}
+            </div>
+          )}
         </article>
       </section>
 

@@ -12,6 +12,14 @@ const HIDDEN_RIDE_NAMES = [
   "The American Adventure"
 ];
 
+const SOURCE_IMPACT: Record<string, string> = {
+  "queue-times": "Ride waits and land grouping",
+  "themeparks-children": "Attractions, dining, and locations",
+  "themeparks-live": "Live statuses, shows, and meet-and-greets",
+  "themeparks-schedule": "Park hours and operating schedules",
+  "osm-overpass": "Restrooms, water, and first aid"
+};
+
 let metricsDb: DatabaseSync | null = null;
 
 function connectMetrics() {
@@ -42,6 +50,15 @@ function connectMetrics() {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_preference_sync_updated ON preference_sync (updated_at);
+      CREATE TABLE IF NOT EXISTS api_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        route TEXT NOT NULL,
+        method TEXT NOT NULL,
+        status INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_api_requests_route_time ON api_requests (route, created_at);
     `);
   }
   return metricsDb;
@@ -70,6 +87,28 @@ export function recordEvent(visitorId: string, eventName: string, detail: string
   connectMetrics()
     .prepare("INSERT INTO events (visitor_id, event_name, detail, created_at) VALUES (?, ?, ?, ?)")
     .run(visitorId, eventName, detail, new Date().toISOString());
+}
+
+export function recordApiRequest(route: string, method: string, status: number, durationMs: number) {
+  connectMetrics()
+    .prepare("INSERT INTO api_requests (route, method, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(route, method, status, durationMs, new Date().toISOString());
+}
+
+export async function withApiTelemetry(route: string, method: string, handler: () => Response | Promise<Response>) {
+  const started = Date.now();
+  let status = 500;
+  try {
+    const response = await handler();
+    status = response.status;
+    return response;
+  } finally {
+    try {
+      recordApiRequest(route, method, status, Date.now() - started);
+    } catch {
+      // Avoid failing user-facing API routes when telemetry storage is unavailable.
+    }
+  }
 }
 
 export function savePreferenceSync(payload: unknown, code?: string) {
@@ -171,7 +210,72 @@ export function getUsageStats() {
           LIMIT 5
         `
       )
-      .all() as Array<{ rideId: string; toggles: number }>
+      .all() as Array<{ rideId: string; toggles: number }>,
+    recommendationEngagement: database
+      .prepare(
+        `
+          SELECT event_name AS eventName, COUNT(*) AS count
+          FROM events
+          WHERE event_name IN (
+            'ride_sheet_open',
+            'snipe_created',
+            'plan_item_add',
+            'preference_profile',
+            'no_go_toggle',
+            'party_day_share',
+            'preference_sync_save',
+            'preference_sync_restore',
+            'land_flow_start',
+            'copilot_open'
+          )
+          GROUP BY event_name
+          ORDER BY count DESC
+        `
+      )
+      .all() as Array<{ eventName: string; count: number }>,
+    preferenceSync: database
+      .prepare(
+        `
+          SELECT
+            COUNT(*) AS totalCodes,
+            COUNT(CASE WHEN date(created_at, 'localtime') = date('now', 'localtime') THEN 1 END) AS codesCreatedToday,
+            COUNT(CASE WHEN date(updated_at, 'localtime') = date('now', 'localtime') THEN 1 END) AS codesUpdatedToday,
+            MAX(updated_at) AS lastUpdatedAt,
+            ROUND(AVG(LENGTH(payload))) AS averagePayloadBytes,
+            MAX(LENGTH(payload)) AS maxPayloadBytes
+          FROM preference_sync
+        `
+      )
+      .get() as {
+      totalCodes: number;
+      codesCreatedToday: number;
+      codesUpdatedToday: number;
+      lastUpdatedAt: string | null;
+      averagePayloadBytes: number | null;
+      maxPayloadBytes: number | null;
+    },
+    apiUsage: database
+      .prepare(
+        `
+          SELECT
+            route,
+            COUNT(*) AS requests,
+            ROUND(AVG(duration_ms)) AS averageDurationMs,
+            SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
+            MAX(created_at) AS lastSeenAt
+          FROM api_requests
+          WHERE datetime(created_at) >= datetime('now', '-24 hours')
+          GROUP BY route
+          ORDER BY requests DESC
+        `
+      )
+      .all() as Array<{
+      route: string;
+      requests: number;
+      averageDurationMs: number | null;
+      errors: number;
+      lastSeenAt: string;
+    }>
   };
 }
 
@@ -471,6 +575,137 @@ export function getStorageStats() {
       checks: number;
     }>;
 
+    const sourceImpact = database
+      .prepare(
+        `
+          SELECT
+            source,
+            MAX(checked_at) AS lastCheckAt,
+            MAX(CASE WHEN success = 1 THEN checked_at END) AS lastSuccessAt,
+            MAX(CASE WHEN success = 0 THEN checked_at END) AS lastFailureAt,
+            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failuresLast24h,
+            COUNT(*) AS checksLast24h,
+            ROUND(100.0 * SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) / COUNT(*)) AS failureRate
+          FROM source_checks
+          WHERE datetime(checked_at) >= datetime('now', '-24 hours')
+          GROUP BY source
+          ORDER BY source
+        `
+      )
+      .all() as Array<{
+      source: string;
+      lastCheckAt: string;
+      lastSuccessAt: string | null;
+      lastFailureAt: string | null;
+      failuresLast24h: number;
+      checksLast24h: number;
+      failureRate: number;
+    }>;
+
+    const dataTypeFreshness = {
+      waits: database
+        .prepare("SELECT MAX(captured_at) AS lastUpdatedAt, COUNT(*) AS rows FROM wait_snapshots")
+        .get() as { lastUpdatedAt: string | null; rows: number },
+      schedules: database
+        .prepare("SELECT MAX(captured_at) AS lastUpdatedAt, COUNT(*) AS rows FROM park_schedules")
+        .get() as { lastUpdatedAt: string | null; rows: number },
+      showtimes: database
+        .prepare("SELECT MAX(captured_at) AS lastUpdatedAt, COUNT(*) AS rows FROM showtimes")
+        .get() as { lastUpdatedAt: string | null; rows: number },
+      restaurants: database
+        .prepare("SELECT MAX(updated_at) AS lastUpdatedAt, COUNT(*) AS rows FROM restaurants")
+        .get() as { lastUpdatedAt: string | null; rows: number },
+      facilities: database
+        .prepare("SELECT MAX(updated_at) AS lastUpdatedAt, COUNT(*) AS rows FROM facilities")
+        .get() as { lastUpdatedAt: string | null; rows: number }
+    };
+
+    const facilitiesByPark = database
+      .prepare(
+        `
+          SELECT
+            p.slug,
+            p.short_name AS shortName,
+            COUNT(f.id) AS total,
+            SUM(CASE WHEN f.category = 'restroom' THEN 1 ELSE 0 END) AS restrooms,
+            SUM(CASE WHEN f.category = 'water' THEN 1 ELSE 0 END) AS water,
+            SUM(CASE WHEN f.category = 'first-aid' THEN 1 ELSE 0 END) AS firstAid,
+            MAX(f.updated_at) AS lastUpdatedAt
+          FROM parks p
+          LEFT JOIN facilities f ON f.park_slug = p.slug
+          GROUP BY p.slug, p.short_name
+          ORDER BY p.short_name
+        `
+      )
+      .all() as Array<{
+      slug: string;
+      shortName: string;
+      total: number;
+      restrooms: number;
+      water: number;
+      firstAid: number;
+      lastUpdatedAt: string | null;
+    }>;
+
+    const impossibleWaitSwings = database
+      .prepare(
+        `
+          WITH ordered AS (
+            SELECT
+              a.name,
+              p.short_name AS parkName,
+              ws.wait_time AS waitTime,
+              LAG(ws.wait_time) OVER (PARTITION BY ws.attraction_id ORDER BY ws.captured_at) AS previousWaitTime,
+              ws.captured_at AS capturedAt
+            FROM wait_snapshots ws
+            JOIN attractions a ON a.id = ws.attraction_id
+            JOIN parks p ON p.slug = ws.park_slug
+            WHERE ws.wait_time IS NOT NULL
+              AND datetime(ws.captured_at) >= datetime('now', '-12 hours')
+              AND a.category = 'ride'
+          )
+          SELECT name, parkName, ABS(waitTime - previousWaitTime) AS swing, capturedAt
+          FROM ordered
+          WHERE previousWaitTime IS NOT NULL
+            AND ABS(waitTime - previousWaitTime) >= 60
+          ORDER BY swing DESC, capturedAt DESC
+          LIMIT 5
+        `
+      )
+      .all() as Array<{ name: string; parkName: string; swing: number; capturedAt: string }>;
+
+    const zeroOpenDuringHours = parks.filter((park) => {
+      const row = database
+        .prepare(
+          `
+            SELECT COUNT(*) AS openRides
+            FROM wait_snapshots ws
+            JOIN (
+              SELECT attraction_id, MAX(captured_at) AS captured_at
+              FROM wait_snapshots
+              WHERE park_slug = ?
+              GROUP BY attraction_id
+            ) latest ON latest.attraction_id = ws.attraction_id AND latest.captured_at = ws.captured_at
+            JOIN attractions a ON a.id = ws.attraction_id
+            WHERE a.category = 'ride'
+              AND ws.is_open = 1
+          `
+        )
+        .get(park.slug) as { openRides: number };
+      const openNow = database
+        .prepare(
+          `
+            SELECT COUNT(*) AS openSchedules
+            FROM park_schedules
+            WHERE park_slug = ?
+              AND datetime(opening_time) <= datetime('now')
+              AND datetime(closing_time) >= datetime('now')
+          `
+        )
+        .get(park.slug) as { openSchedules: number };
+      return openNow.openSchedules > 0 && row.openRides === 0;
+    });
+
     const recentErrors = database
       .prepare(
         `
@@ -515,8 +750,14 @@ export function getStorageStats() {
         latestSnapshotAgeMinutes
       },
       sourceHealth,
+      sourceImpact: sourceImpact.map((source) => ({
+        ...source,
+        impact: SOURCE_IMPACT[source.source] ?? "Unknown app feature"
+      })),
       pollingTimeline,
       dataGrowth,
+      dataTypeFreshness,
+      facilitiesByPark,
       freshnessHeatmap,
       topMovers,
       coverageQuality,
@@ -524,7 +765,9 @@ export function getStorageStats() {
       runtime,
       anomalies: {
         flatlineRides,
-        attractionCoverageDrops
+        attractionCoverageDrops,
+        impossibleWaitSwings,
+        zeroOpenDuringHours
       },
       sourceLatencyTrend,
       recentErrors,
