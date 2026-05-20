@@ -14,9 +14,12 @@
   --park-surface: rgba(255, 255, 255, 0.86);
   --shadow: 0 10px 28px rgba(0, 0, 0, 0.06);
   --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.04);
-  --radius-xl: 24px;
-  --radius-lg: 18px;
-  --radius-md: 12px;
+  --radius-xl: 22px;
+  --radius-lg: 16px;
+  --radius-md: 10px;
+  --card-border: rgba(60, 60, 67, 0.13);
+  --card-shadow: 0 14px 30px rgba(23, 50, 77, .075), 0 2px 8px rgba(29,29,31,.035);
+  --card-shadow-soft: 0 8px 20px rgba(23, 50, 77, .055);
   --tone-low: #bfe8c2;
   --tone-mid: #ffe39a;
   --tone-high: #ffc0a8;
@@ -66,6 +69,26 @@ a {
 button,
 input {
   font: inherit;
+}
+
+button,
+summary,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+summary,
+.ride-row,
+.panel,
+.mode-tabs {
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease;
 }
 
 .shell {
@@ -159,7 +182,8 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: .96rem;
+  font-size: .98rem;
+  letter-spacing: 0;
 }
 
 .app-bar-status {
@@ -177,14 +201,13 @@ input {
 .panel,
 .land-card {
   background:
-    linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.72)),
+    linear-gradient(180deg, rgba(255,255,255,.94), rgba(255,255,255,.78)),
     color-mix(in srgb, var(--bg-panel) 94%, white);
-  border: 1px solid var(--line);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius-xl);
   box-shadow:
-    0 16px 34px rgba(23, 50, 77, .08),
-    0 2px 8px rgba(29,29,31,.04),
-    inset 0 1px 0 rgba(255,255,255,.82);
+    var(--card-shadow),
+    inset 0 1px 0 rgba(255,255,255,.86);
 }
 
 .command-card,
@@ -600,8 +623,17 @@ input {
   gap: 6px;
 }
 
+.with-icon svg,
+.mode-icon svg,
+.sheet-alert-row svg,
+.sheet-day-actions svg,
+.alert-preset-grid svg,
+.agenda-row button svg {
+  flex: 0 0 auto;
+}
+
 .with-icon::before {
-  display: inline-grid;
+  display: none;
   place-items: center;
   width: 18px;
   height: 18px;
@@ -764,8 +796,6 @@ input {
     linear-gradient(180deg, rgba(255,255,255,.66), rgba(255,255,255,.12)),
     color-mix(in srgb, var(--park-accent) 14%, rgba(60,60,67,.1));
   color: color-mix(in srgb, var(--park-accent) 58%, var(--ink-soft));
-  font-size: .82rem;
-  font-weight: 900;
   line-height: 1;
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.64),
@@ -1235,6 +1265,10 @@ input {
 .agenda-hero button,
 .agenda-actions button,
 .agenda-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 0;
   border-radius: 999px;
   padding: 10px 12px;
@@ -1457,6 +1491,10 @@ input {
 }
 
 .alert-preset-grid button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: white;
@@ -1668,6 +1706,10 @@ button.flow-card {
 
 .sheet-day-actions button,
 .official-links a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: white;
@@ -1962,6 +2004,14 @@ h1 {
   details summary {
     font-size: 0.88rem;
     line-height: 1.15;
+  }
+
+  .smart-move-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .smart-move {
+    padding: 9px 10px;
   }
 
   .panel:not(.ride-panel) {
@@ -2521,6 +2571,67 @@ h1 {
   line-height: 1.35;
 }
 
+.skeleton-panel {
+  display: grid;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.skeleton-line,
+.skeleton-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--park-accent) 8%, rgba(255,255,255,.88));
+}
+
+.skeleton-line::after,
+.skeleton-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.72), transparent);
+  animation: skeleton-sweep 1.5s ease-in-out infinite;
+}
+
+.skeleton-title {
+  width: 42%;
+  height: 18px;
+}
+
+.skeleton-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.skeleton-grid .skeleton-line {
+  height: 46px;
+  border-radius: 14px;
+}
+
+.skeleton-hero {
+  height: 118px;
+  border-radius: 20px;
+}
+
+.skeleton-list {
+  display: grid;
+  gap: 8px;
+}
+
+.skeleton-list .skeleton-line {
+  height: 44px;
+  border-radius: 14px;
+}
+
+@keyframes skeleton-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 .hour-list,
 .show-grid,
 .ride-list,
@@ -2968,8 +3079,10 @@ details summary {
   display: flex;
   align-items: flex-end;
   padding: calc(8px + var(--safe-top)) 0 0;
-  background: rgba(20, 20, 20, 0.24);
-  backdrop-filter: blur(6px);
+  background:
+    radial-gradient(circle at 50% 100%, rgba(255,255,255,.16), transparent 38%),
+    rgba(20, 20, 20, 0.28);
+  backdrop-filter: blur(10px);
 }
 
 .ride-sheet {
@@ -2980,9 +3093,11 @@ details summary {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 10px 16px calc(24px + var(--safe-bottom));
-  border-radius: 24px 24px 0 0;
+  border: 1px solid rgba(255,255,255,.72);
+  border-bottom: 0;
+  border-radius: 26px 26px 0 0;
   background:
-    radial-gradient(circle at top center, rgba(255, 255, 255, 0.92), transparent 40%),
+    radial-gradient(circle at top center, var(--park-surface-tint), transparent 42%),
     linear-gradient(180deg, rgba(252, 252, 248, 0.99), rgba(244, 244, 238, 0.99));
   box-shadow:
     0 -24px 44px rgba(20, 20, 20, 0.2),
@@ -3008,7 +3123,7 @@ details summary {
   margin: 0 -16px 16px;
   padding: 10px 16px 12px;
   background:
-    linear-gradient(180deg, rgba(252, 252, 248, 0.98), rgba(252, 252, 248, 0.92));
+    linear-gradient(180deg, rgba(252, 252, 248, 0.98), rgba(252, 252, 248, 0.9));
   backdrop-filter: blur(14px);
   border-bottom: 1px solid rgba(60, 60, 67, 0.1);
 }
@@ -3021,7 +3136,7 @@ details summary {
   margin-bottom: 14px;
   padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 22px;
+  border-radius: 18px;
   background:
     linear-gradient(135deg, rgba(255,255,255,.96), rgba(249,249,246,.82)),
     color-mix(in srgb, var(--tone-muted) 24%, white);
@@ -3070,10 +3185,10 @@ details summary {
 }
 
 .sheet-summary .wait-pill {
-  min-width: 112px;
-  padding: 14px 16px;
-  border-radius: 20px;
-  font-size: 1rem;
+  min-width: 104px;
+  padding: 13px 15px;
+  border-radius: 18px;
+  font-size: 1.02rem;
 }
 
 .sheet-summary .sheet-favorite {
@@ -3094,6 +3209,9 @@ details summary {
 }
 
 .sheet-alert-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--ink-soft);
   font-size: 0.88rem;
   font-weight: 700;

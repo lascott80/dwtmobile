@@ -1,6 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bell,
+  CalendarClock,
+  CheckCircle2,
+  Clock3,
+  EyeOff,
+  Filter,
+  ListFilter,
+  MapPinned,
+  Navigation,
+  Sparkles,
+  Star,
+  Ticket,
+  UsersRound
+} from "lucide-react";
 import type { LandGroup, ParkDetailResponse, ParkMetaResponse, RideHistoryPoint, RideItem, ShowTimeItem } from "@/lib/types";
 import { VISITOR_KEY } from "@/components/visit-tracker";
 
@@ -290,10 +305,10 @@ function parkThemeClass(slug: string) {
 }
 
 function modeIcon(mode: DashboardMode) {
-  if (mode === "today") return "◎";
-  if (mode === "map") return "⌖";
-  if (mode === "my-day") return "✓";
-  return "≡";
+  if (mode === "today") return <Sparkles size={14} strokeWidth={2.4} />;
+  if (mode === "map") return <MapPinned size={14} strokeWidth={2.4} />;
+  if (mode === "my-day") return <CheckCircle2 size={14} strokeWidth={2.4} />;
+  return <ListFilter size={14} strokeWidth={2.4} />;
 }
 
 function rideVisualClass(ride: RideItem, prediction: RidePrediction) {
@@ -370,6 +385,24 @@ function meetGreetWaitLabel(show: ShowTimeItem) {
   if (typeof show.waitTime === "number") return show.waitTime === 0 ? "Walk on" : `${show.waitTime} min`;
   if (show.isOpen === false || show.status === "CLOSED") return "Closed";
   return null;
+}
+
+function LoadingDashboard() {
+  return (
+    <section className="panel skeleton-panel" aria-label="Loading park dashboard">
+      <div className="skeleton-line skeleton-title" />
+      <div className="skeleton-grid">
+        <div className="skeleton-line" />
+        <div className="skeleton-line" />
+        <div className="skeleton-line" />
+      </div>
+      <div className="skeleton-hero" />
+      <div className="skeleton-list">
+        <div className="skeleton-line" />
+        <div className="skeleton-line" />
+      </div>
+    </section>
+  );
 }
 
 function rangesOverlap(first: PlanItem, second: PlanItem) {
@@ -1737,7 +1770,7 @@ export function ParkDashboard() {
         ))}
       </nav>
 
-      {loading && <section className="panel">Loading cached park data...</section>}
+      {loading && <LoadingDashboard />}
 
       {!loading && parkData && (
         <>
@@ -1821,7 +1854,7 @@ export function ParkDashboard() {
                 }}
                 type="button"
               >
-                <span className="with-icon icon-next">{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
+                <span className="with-icon icon-next"><Navigation size={15} strokeWidth={2.5} />{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
                 <strong>{parkCopilot.headline}</strong>
                 <small>{parkCopilot.detail}</small>
                 <div className="command-reason">
@@ -1882,13 +1915,19 @@ export function ParkDashboard() {
                 {smartMoves.map((move) =>
                   "ride" in move ? (
                     <button className={`smart-move smart-${move.tone}`} key={move.key} onClick={() => openRideDetails(move.ride)} type="button">
-                      <span className={`with-icon icon-${move.tone}`}>{move.label}</span>
+                      <span className={`with-icon icon-${move.tone}`}>
+                        {move.tone === "ride" ? <Navigation size={13} /> : <MapPinned size={13} />}
+                        {move.label}
+                      </span>
                       <strong>{move.title}</strong>
                       <small>{move.detail}</small>
                     </button>
                   ) : (
                     <article className={`smart-move smart-${move.tone}`} key={move.key}>
-                      <span className={`with-icon icon-${move.tone}`}>{move.label}</span>
+                      <span className={`with-icon icon-${move.tone}`}>
+                        {move.tone === "character" ? <UsersRound size={13} /> : <Ticket size={13} />}
+                        {move.label}
+                      </span>
                       <strong>{move.title}</strong>
                       <small>{move.detail}</small>
                     </article>
@@ -1964,7 +2003,7 @@ export function ParkDashboard() {
               )}
               {parkData.hours.length > 0 && <section className="panel compact-info-panel info-hours">
                 <details>
-                  <summary><span className="with-icon icon-clock">Park Hours Today</span></summary>
+                  <summary><span className="with-icon icon-clock"><Clock3 size={14} />Park Hours Today</span></summary>
                   <div className="details-body">
                     <div className="hour-list">
                       {parkData.hours.map((entry) => (
@@ -1980,7 +2019,7 @@ export function ParkDashboard() {
               {parkData.featuredShows.length > 0 && (
                 <section className="panel compact-info-panel info-shows">
                   <details>
-                    <summary><span className="with-icon icon-show">Featured Showtimes</span></summary>
+                    <summary><span className="with-icon icon-show"><Ticket size={14} />Featured Showtimes</span></summary>
                     <div className="details-body">
                       <div className="show-grid">
                         {parkData.featuredShows.map((show) => (
@@ -2061,10 +2100,10 @@ export function ParkDashboard() {
                 <strong>{activeParkAlerts}</strong>
               </div>
               <div className="alert-preset-grid">
-                <button onClick={() => void enableRideAlerts(favoriteRides, 25)} type="button">Favorites under 25</button>
-                <button onClick={() => void enableRideAlerts(mustDoRides, 30)} type="button">Must-do under 30</button>
-                <button onClick={() => void enableRideAlerts(bestBets.map(({ ride }) => ride), 25)} type="button">Best bets under 25</button>
-                <button onClick={clearParkAlerts} type="button">Clear park alerts</button>
+                <button onClick={() => void enableRideAlerts(favoriteRides, 25)} type="button"><Bell size={14} />Favorites under 25</button>
+                <button onClick={() => void enableRideAlerts(mustDoRides, 30)} type="button"><Star size={14} />Must-do under 30</button>
+                <button onClick={() => void enableRideAlerts(bestBets.map(({ ride }) => ride), 25)} type="button"><Sparkles size={14} />Best bets under 25</button>
+                <button onClick={clearParkAlerts} type="button"><Filter size={14} />Clear park alerts</button>
               </div>
             </div>
             {hiddenRides.length > 0 && (
@@ -2079,7 +2118,7 @@ export function ParkDashboard() {
                       <strong>{ride.name}</strong>
                       <span>{minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}</span>
                     </div>
-                    <button onClick={() => toggleNoGoRide(ride.id)} type="button">Show</button>
+                    <button onClick={() => toggleNoGoRide(ride.id)} type="button"><EyeOff size={14} />Show</button>
                   </article>
                 ))}
               </div>
@@ -2240,7 +2279,7 @@ export function ParkDashboard() {
 
           {dashboardMode === "today" && parkData.meetGreets.length > 0 && <section className="panel compact-info-panel info-characters">
             <details>
-              <summary><span className="with-icon icon-character">Character Meet &amp; Greet Times</span></summary>
+              <summary><span className="with-icon icon-character"><UsersRound size={14} />Character Meet &amp; Greet Times</span></summary>
               <div className="details-body">
                 <div className="show-grid">
                   {parkData.meetGreets.map((show) => (
@@ -2564,12 +2603,12 @@ export function ParkDashboard() {
             <div className="sheet-alert-row">
               {alertThresholds[selectedRide.id] ? (
                 <>
-                  <span>Alert below {alertThresholds[selectedRide.id]} min</span>
+                <span><Bell size={15} /> Alert below {alertThresholds[selectedRide.id]} min</span>
                   <button onClick={() => disableAlert(selectedRide.id)} type="button">Turn off</button>
                 </>
               ) : (
                 <>
-                  <span>Favorite alert</span>
+                  <span><Bell size={15} /> Favorite alert</span>
                   <button onClick={() => enableAlert(selectedRide.id)} type="button">Notify below 30 min</button>
                 </>
               )}
@@ -2589,8 +2628,8 @@ export function ParkDashboard() {
             </div>
 
             <div className="sheet-day-actions">
-              <button onClick={() => addPlanItem(selectedRide, "lightning-lane")} type="button">Add LL return</button>
-              <button onClick={() => addPlanItem(selectedRide, "virtual-queue")} type="button">Add VQ time</button>
+              <button onClick={() => addPlanItem(selectedRide, "lightning-lane")} type="button"><CalendarClock size={14} />Add LL return</button>
+              <button onClick={() => addPlanItem(selectedRide, "virtual-queue")} type="button"><Clock3 size={14} />Add VQ time</button>
               <button
                 className={noGoRideIds.includes(selectedRide.id) ? "active" : ""}
                 onClick={() => toggleNoGoRide(selectedRide.id)}
