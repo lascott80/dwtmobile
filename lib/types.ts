@@ -42,6 +42,8 @@ export type ShowTimeItem = {
   startTime: string;
   endTime: string | null;
   status: string;
+  waitTime?: number | null;
+  isOpen?: boolean | null;
 };
 
 export type RestaurantItem = {

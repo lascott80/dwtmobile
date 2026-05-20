@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { LandGroup, ParkDetailResponse, ParkMetaResponse, RideHistoryPoint, RideItem } from "@/lib/types";
+import type { LandGroup, ParkDetailResponse, ParkMetaResponse, RideHistoryPoint, RideItem, ShowTimeItem } from "@/lib/types";
 import { VISITOR_KEY } from "@/components/visit-tracker";
 
 const FAVORITES_KEY = "dwtmobile:favorites";
@@ -32,6 +32,9 @@ type WeatherResponse = {
   hourly?: { time?: string[]; precipitation_probability?: number[]; precipitation?: number[] };
 };
 type RidePrediction = ReturnType<typeof predictionForRide>;
+type SmartMove =
+  | { key: string; label: string; title: string; detail: string; ride: RideItem; tone: "ride" | "land" }
+  | { key: string; label: string; title: string; detail: string; show: ShowTimeItem; tone: "show" | "character" };
 type PartyDay = { name: string; sharedAt: string };
 type PlanItem = {
   id: string;
@@ -287,10 +290,10 @@ function parkThemeClass(slug: string) {
 }
 
 function modeIcon(mode: DashboardMode) {
-  if (mode === "today") return "◒";
+  if (mode === "today") return "◎";
   if (mode === "map") return "⌖";
   if (mode === "my-day") return "✓";
-  return "≋";
+  return "≡";
 }
 
 function rideVisualClass(ride: RideItem, prediction: RidePrediction) {
@@ -354,6 +357,19 @@ function planItemTypeLabel(type: PlanItem["type"]) {
 
 function formatPlanItemTime(item: PlanItem) {
   return `${planItemTypeLabel(item.type)} · ${formatTime(item.startTime)}${item.endTime ? `-${formatTime(item.endTime)}` : ""}`;
+}
+
+function meetGreetDetail(show: ShowTimeItem) {
+  const time = formatHourRange(show.startTime, show.endTime ?? show.startTime);
+  if (typeof show.waitTime === "number") return `${time} · ${show.waitTime === 0 ? "Walk on" : `${show.waitTime} min`}`;
+  if (show.isOpen === false || show.status === "CLOSED") return `${time} · Closed`;
+  return time;
+}
+
+function meetGreetWaitLabel(show: ShowTimeItem) {
+  if (typeof show.waitTime === "number") return show.waitTime === 0 ? "Walk on" : `${show.waitTime} min`;
+  if (show.isOpen === false || show.status === "CLOSED") return "Closed";
+  return null;
 }
 
 function rangesOverlap(first: PlanItem, second: PlanItem) {
@@ -430,6 +446,8 @@ export function ParkDashboard() {
   const [favorites, setFavorites] = useState<string[]>([]);
   const [alertThresholds, setAlertThresholds] = useState<Record<string, number>>({});
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [showHiddenRides, setShowHiddenRides] = useState(false);
+  const [denseRideRows, setDenseRideRows] = useState(true);
   const [rideSort, setRideSort] = useState<RideSort>("land");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRide, setSelectedRide] = useState<RideItem | null>(null);
@@ -461,6 +479,8 @@ export function ParkDashboard() {
   const favoritesRef = useRef<string[]>([]);
   const alertThresholdsRef = useRef<Record<string, number>>({});
   const pushAlertsEnabledRef = useRef(false);
+  const selectedRideRef = useRef<RideItem | null>(null);
+  const rideSheetHistoryRef = useRef(false);
 
   useEffect(() => {
     favoritesRef.current = favorites;
@@ -754,6 +774,21 @@ export function ParkDashboard() {
     };
   }, [selectedRide]);
 
+  useEffect(() => {
+    selectedRideRef.current = selectedRide;
+  }, [selectedRide]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (!rideSheetHistoryRef.current) return;
+      rideSheetHistoryRef.current = false;
+      setSelectedRide(null);
+      setRideHistory([]);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   function toggleFavorite(attractionId: string) {
     completeOnboarding();
     setFavorites((current) => {
@@ -768,6 +803,10 @@ export function ParkDashboard() {
 
   function openRideDetails(ride: RideItem) {
     completeOnboarding();
+    if (!selectedRideRef.current) {
+      window.history.pushState({ dwtRideSheet: ride.id }, "", window.location.href);
+      rideSheetHistoryRef.current = true;
+    }
     setSelectedRide(ride);
     setRideHistory([]);
     void fetch(`/api/rides/${ride.id}/history`)
@@ -778,7 +817,13 @@ export function ParkDashboard() {
   }
 
   function closeRideDetails() {
+    if (rideSheetHistoryRef.current && window.history.state?.dwtRideSheet) {
+      window.history.back();
+      return;
+    }
+    rideSheetHistoryRef.current = false;
     setSelectedRide(null);
+    setRideHistory([]);
   }
 
   function trackEvent(eventName: string, detail: string) {
@@ -938,6 +983,25 @@ export function ParkDashboard() {
     });
   }
 
+  async function enableRideAlerts(rides: RideItem[], threshold = 25) {
+    completeOnboarding();
+    if ("Notification" in window && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+    const alertableRideIds = rides
+      .filter((ride) => isRecommendableRide(ride, noGoRideIds) && ride.isOpen)
+      .map((ride) => ride.id);
+    if (alertableRideIds.length === 0) return;
+    setAlertThresholds((current) => {
+      const next = { ...current };
+      for (const rideId of alertableRideIds) {
+        next[rideId] = threshold;
+      }
+      window.localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
   async function enablePushAlerts() {
     if (!("Notification" in window)) return;
     const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
@@ -970,6 +1034,18 @@ export function ParkDashboard() {
     setAlertThresholds((current) => {
       const next = { ...current };
       delete next[rideId];
+      window.localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function clearParkAlerts() {
+    setAlertThresholds((current) => {
+      const parkRideIds = new Set(allRides.map((ride) => ride.id));
+      const next = { ...current };
+      for (const rideId of parkRideIds) {
+        delete next[rideId];
+      }
       window.localStorage.setItem(ALERTS_KEY, JSON.stringify(next));
       return next;
     });
@@ -1161,16 +1237,24 @@ export function ParkDashboard() {
             rides: land.rides.filter((ride) => favorites.includes(ride.id))
           }))
           .filter((land) => land.rides.length > 0);
+    const visibleLands = showHiddenRides
+      ? baseLands
+      : baseLands
+          .map((land) => ({
+            ...land,
+            rides: land.rides.filter((ride) => !noGoRideIds.includes(ride.id))
+          }))
+          .filter((land) => land.rides.length > 0);
 
     if (rideSort === "land") {
-      return baseLands.map((land) => ({
+      return visibleLands.map((land) => ({
         ...land,
         rides: pinFavoritesFirst(land.rides, favorites)
       }));
     }
 
     if (rideSort === "alpha" || rideSort === "wait-desc" || rideSort === "wait-asc" || rideSort === "favorites") {
-      const allRides = baseLands.flatMap((land) => land.rides);
+      const allRides = visibleLands.flatMap((land) => land.rides);
       return [
         {
           name: rideSort === "favorites" ? "Favorites First" : "All Attractions",
@@ -1179,14 +1263,22 @@ export function ParkDashboard() {
       ];
     }
 
-    return baseLands;
-  }, [favorites, favoritesOnly, parkData, rideSort, searchQuery]);
+    return visibleLands;
+  }, [favorites, favoritesOnly, noGoRideIds, parkData, rideSort, searchQuery, showHiddenRides]);
 
   const allRides = useMemo(() => parkData?.lands.flatMap((land) => land.rides) ?? [], [parkData]);
+  const recommendableRideIds = useMemo(
+    () => new Set(allRides.filter((ride) => isRecommendableRide(ride, noGoRideIds)).map((ride) => ride.id)),
+    [allRides, noGoRideIds]
+  );
   const openRides = useMemo(() => allRides.filter((ride) => ride.isOpen), [allRides]);
+  const openRecommendableRides = useMemo(
+    () => openRides.filter((ride) => isRecommendableRide(ride, noGoRideIds)),
+    [noGoRideIds, openRides]
+  );
   const shortWaitRides = useMemo(
-    () => openRides.filter((ride) => ride.waitTime !== null && ride.waitTime <= 20),
-    [openRides]
+    () => openRecommendableRides.filter((ride) => ride.waitTime !== null && ride.waitTime <= 20),
+    [openRecommendableRides]
   );
   const visibleWaits = useMemo(
     () => openRides.map((ride) => ride.waitTime).filter((waitTime): waitTime is number => waitTime !== null),
@@ -1220,9 +1312,10 @@ export function ParkDashboard() {
       allRides
         .filter(
           (ride) =>
-            (ride.isOpen && ride.previousIsOpen === false) ||
-            (!ride.isOpen && ride.previousIsOpen === true) ||
-            Math.abs(ride.trendMinutes ?? 0) >= 5
+            isRecommendableRide(ride, noGoRideIds) &&
+            ((ride.isOpen && ride.previousIsOpen === false) ||
+              (!ride.isOpen && ride.previousIsOpen === true) ||
+              Math.abs(ride.trendMinutes ?? 0) >= 5)
         )
         .sort((a, b) => {
           const aReopen = Number(a.isOpen && a.previousIsOpen === false);
@@ -1231,7 +1324,7 @@ export function ParkDashboard() {
           return Math.abs(b.trendMinutes ?? 0) - Math.abs(a.trendMinutes ?? 0);
         })
         .slice(0, 3),
-    [allRides]
+    [allRides, noGoRideIds]
   );
   const bestBets = useMemo(
     () =>
@@ -1258,6 +1351,11 @@ export function ParkDashboard() {
   const mustDoRides = useMemo(() => allRides.filter((ride) => dayState[ride.id] === "must-do"), [allRides, dayState]);
   const doneRides = useMemo(() => allRides.filter((ride) => dayState[ride.id] === "done"), [allRides, dayState]);
   const skippedRides = useMemo(() => allRides.filter((ride) => dayState[ride.id] === "skip"), [allRides, dayState]);
+  const hiddenRides = useMemo(() => allRides.filter((ride) => noGoRideIds.includes(ride.id)), [allRides, noGoRideIds]);
+  const activeParkAlerts = useMemo(
+    () => allRides.filter((ride) => alertThresholds[ride.id]).length,
+    [alertThresholds, allRides]
+  );
   const bestFavorite = favoriteRides[0] ?? null;
   const recap = useMemo(() => {
     const estimatedWaitAvoided = doneRides.reduce((sum, ride) => {
@@ -1392,12 +1490,14 @@ export function ParkDashboard() {
   }, [allRides, favorites, partyFilter]);
   const timelineItems = useMemo(() => {
     const items = [
-      ...planItems.map((item) => ({
-        key: `plan-${item.id}`,
-        time: item.startTime,
-        label: item.name,
-        detail: formatPlanItemTime(item)
-      })),
+      ...planItems
+        .filter((item) => !item.rideId || recommendableRideIds.has(item.rideId))
+        .map((item) => ({
+          key: `plan-${item.id}`,
+          time: item.startTime,
+          label: item.name,
+          detail: formatPlanItemTime(item)
+        })),
       ...favoriteRides.slice(0, 3).map((ride) => ({
         key: `ride-${ride.id}`,
         time: ride.lastUpdated,
@@ -1414,11 +1514,11 @@ export function ParkDashboard() {
     return items
       .filter((item) => item.time)
       .sort((a, b) => new Date(a.time as string).getTime() - new Date(b.time as string).getTime());
-  }, [favoriteRides, parkData, planItems]);
+  }, [favoriteRides, parkData, planItems, recommendableRideIds]);
   const predictionWindows = useMemo(
     () =>
       allRides
-        .filter((ride) => isRecommendableRide(ride, noGoRideIds) && ride.isOpen && ride.waitTime !== null)
+        .filter((ride) => recommendableRideIds.has(ride.id) && ride.isOpen && ride.waitTime !== null)
         .map((ride) => ({ ride, prediction: ridePredictions.get(ride.id) ?? predictionForRide(ride) }))
         .filter(({ prediction }) => prediction.tone === "now" || prediction.tone === "later")
         .sort((a, b) => {
@@ -1427,7 +1527,7 @@ export function ParkDashboard() {
           return aScore - bScore || (a.ride.waitTime ?? 999) - (b.ride.waitTime ?? 999);
         })
         .slice(0, 4),
-    [allRides, noGoRideIds, ridePredictions]
+    [allRides, recommendableRideIds, ridePredictions]
   );
   const upcomingPlanItems = useMemo(
     () =>
@@ -1490,6 +1590,63 @@ export function ParkDashboard() {
       .sort((a, b) => b.score - a.score)
       .slice(0, 2);
   }, [dayState, favorites, noGoRideIds, parkData, preferenceProfile, tripMemory]);
+  const bestCharacterMeet = useMemo(() => {
+    const now = Date.now();
+    return (parkData?.meetGreets ?? [])
+      .filter((show) => new Date(show.endTime ?? show.startTime).getTime() >= now)
+      .filter((show) => show.isOpen !== false && show.status !== "CLOSED")
+      .sort((a, b) => {
+        const waitA = typeof a.waitTime === "number" ? a.waitTime : Number.MAX_SAFE_INTEGER;
+        const waitB = typeof b.waitTime === "number" ? b.waitTime : Number.MAX_SAFE_INTEGER;
+        return waitA - waitB || new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+      })[0] ?? null;
+  }, [parkData]);
+  const smartMoves = useMemo<SmartMove[]>(() => {
+    const moves: SmartMove[] = [];
+    if (parkCopilot) {
+      moves.push({
+        key: `ride-${parkCopilot.ride.id}`,
+        label: "Best ride",
+        title: parkCopilot.ride.name,
+        detail: parkCopilot.detail,
+        ride: parkCopilot.ride,
+        tone: "ride"
+      });
+    }
+    if (landFlowRecommendations[0]) {
+      const flow = landFlowRecommendations[0];
+      moves.push({
+        key: `land-${flow.landName}`,
+        label: "Best cluster",
+        title: flow.landName,
+        detail: flow.rides.map((ride) => ride.name).join(" -> "),
+        ride: flow.rides[0],
+        tone: "land"
+      });
+    }
+    if (bestCharacterMeet) {
+      const wait = meetGreetWaitLabel(bestCharacterMeet);
+      moves.push({
+        key: `character-${bestCharacterMeet.id}-${bestCharacterMeet.startTime}`,
+        label: "Character",
+        title: bestCharacterMeet.name,
+        detail: `${formatHourRange(bestCharacterMeet.startTime, bestCharacterMeet.endTime ?? bestCharacterMeet.startTime)}${wait ? ` · ${wait}` : ""}`,
+        show: bestCharacterMeet,
+        tone: "character"
+      });
+    }
+    if (nextFeaturedShow) {
+      moves.push({
+        key: `show-${nextFeaturedShow.id}-${nextFeaturedShow.startTime}`,
+        label: "Next show",
+        title: nextFeaturedShow.name,
+        detail: formatTime(nextFeaturedShow.startTime),
+        show: nextFeaturedShow,
+        tone: "show"
+      });
+    }
+    return moves.slice(0, 4);
+  }, [bestCharacterMeet, landFlowRecommendations, nextFeaturedShow, parkCopilot]);
   const tripMemoryStats = useMemo(() => {
     const completed = Object.values(tripMemory.completedRideIds).reduce((sum, count) => sum + count, 0);
     const skipped = Object.values(tripMemory.skippedRideIds).reduce((sum, count) => sum + count, 0);
@@ -1639,7 +1796,7 @@ export function ParkDashboard() {
             </section>
           )}
 
-          <section className={`panel command-card pulse-${parkData.crowdPulse.level}`}>
+          {dashboardMode !== "rides" && <section className={`panel command-card pulse-${parkData.crowdPulse.level}`}>
             <div className="command-head">
               <div>
                 <p>Today in {parkData.park.shortName}</p>
@@ -1664,7 +1821,7 @@ export function ParkDashboard() {
                 }}
                 type="button"
               >
-                <span>{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
+                <span className="with-icon icon-next">{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
                 <strong>{parkCopilot.headline}</strong>
                 <small>{parkCopilot.detail}</small>
                 <div className="command-reason">
@@ -1720,6 +1877,25 @@ export function ParkDashboard() {
                 )}
               </div>
             )}
+            {smartMoves.length > 0 && (
+              <div className="smart-move-grid" aria-label="Smart options for today">
+                {smartMoves.map((move) =>
+                  "ride" in move ? (
+                    <button className={`smart-move smart-${move.tone}`} key={move.key} onClick={() => openRideDetails(move.ride)} type="button">
+                      <span className={`with-icon icon-${move.tone}`}>{move.label}</span>
+                      <strong>{move.title}</strong>
+                      <small>{move.detail}</small>
+                    </button>
+                  ) : (
+                    <article className={`smart-move smart-${move.tone}`} key={move.key}>
+                      <span className={`with-icon icon-${move.tone}`}>{move.label}</span>
+                      <strong>{move.title}</strong>
+                      <small>{move.detail}</small>
+                    </article>
+                  )
+                )}
+              </div>
+            )}
             <div className="command-grid">
               <article>
                 <small>Best now</small>
@@ -1749,7 +1925,7 @@ export function ParkDashboard() {
                 {syncCode ? `Sync ${syncCode}` : "Sync setup"}
               </button>
             </div>
-          </section>
+          </section>}
 
           <nav className="mode-tabs" aria-label="Dashboard sections">
             {(["today", "map", "my-day", "rides"] as const).map((mode) => (
@@ -1786,9 +1962,9 @@ export function ParkDashboard() {
                   ))}
                 </section>
               )}
-              {parkData.hours.length > 0 && <section className="panel">
+              {parkData.hours.length > 0 && <section className="panel compact-info-panel info-hours">
                 <details>
-                  <summary>Park Hours Today</summary>
+                  <summary><span className="with-icon icon-clock">Park Hours Today</span></summary>
                   <div className="details-body">
                     <div className="hour-list">
                       {parkData.hours.map((entry) => (
@@ -1802,9 +1978,9 @@ export function ParkDashboard() {
                 </details>
               </section>}
               {parkData.featuredShows.length > 0 && (
-                <section className="panel">
+                <section className="panel compact-info-panel info-shows">
                   <details>
-                    <summary>Featured Showtimes</summary>
+                    <summary><span className="with-icon icon-show">Featured Showtimes</span></summary>
                     <div className="details-body">
                       <div className="show-grid">
                         {parkData.featuredShows.map((show) => (
@@ -1879,6 +2055,35 @@ export function ParkDashboard() {
               <article><span>Done</span><strong>{doneRides.length}</strong></article>
               <article><span>Wait saved</span><strong>{recap.estimatedWaitAvoided}m</strong></article>
             </div>
+            <div className="agenda-section">
+              <div className="agenda-section-head">
+                <span>Park alerts</span>
+                <strong>{activeParkAlerts}</strong>
+              </div>
+              <div className="alert-preset-grid">
+                <button onClick={() => void enableRideAlerts(favoriteRides, 25)} type="button">Favorites under 25</button>
+                <button onClick={() => void enableRideAlerts(mustDoRides, 30)} type="button">Must-do under 30</button>
+                <button onClick={() => void enableRideAlerts(bestBets.map(({ ride }) => ride), 25)} type="button">Best bets under 25</button>
+                <button onClick={clearParkAlerts} type="button">Clear park alerts</button>
+              </div>
+            </div>
+            {hiddenRides.length > 0 && (
+              <div className="agenda-section">
+                <div className="agenda-section-head">
+                  <span>Hidden rides</span>
+                  <strong>{hiddenRides.length}</strong>
+                </div>
+                {hiddenRides.map((ride) => (
+                  <article className="agenda-row" key={ride.id}>
+                    <div>
+                      <strong>{ride.name}</strong>
+                      <span>{minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}</span>
+                    </div>
+                    <button onClick={() => toggleNoGoRide(ride.id)} type="button">Show</button>
+                  </article>
+                ))}
+              </div>
+            )}
             <div className="agenda-section">
               <div className="agenda-section-head">
                 <span>Returns and queues</span>
@@ -1962,7 +2167,7 @@ export function ParkDashboard() {
             <div className="recap-preview">
               <span>{parkData.park.shortName}</span>
               <strong>{recap.ridesCompleted} rides today · {tripMemoryStats.completed} remembered</strong>
-              <em>{noGoRideIds.length} no-go · {tripMemoryStats.visitedParks} park check-ins · {PROFILE_LABELS[preferenceProfile]}</em>
+              <em>{noGoRideIds.length} hidden · {tripMemoryStats.visitedParks} park check-ins · {PROFILE_LABELS[preferenceProfile]}</em>
             </div>
           </section>}
 
@@ -2033,15 +2238,15 @@ export function ParkDashboard() {
             </div>
           </section>}
 
-          {dashboardMode === "today" && parkData.meetGreets.length > 0 && <section className="panel">
+          {dashboardMode === "today" && parkData.meetGreets.length > 0 && <section className="panel compact-info-panel info-characters">
             <details>
-              <summary>Character Meet &amp; Greet Times</summary>
+              <summary><span className="with-icon icon-character">Character Meet &amp; Greet Times</span></summary>
               <div className="details-body">
                 <div className="show-grid">
                   {parkData.meetGreets.map((show) => (
                     <article className="show-card" key={`${show.id}-${show.startTime}`}>
                       <strong>{show.name}</strong>
-                      <span>{formatHourRange(show.startTime, show.endTime ?? show.startTime)}</span>
+                      <span>{meetGreetDetail(show)}</span>
                     </article>
                   ))}
                 </div>
@@ -2049,7 +2254,7 @@ export function ParkDashboard() {
             </details>
           </section>}
 
-          {dashboardMode === "rides" && <section className="panel ride-panel">
+          {dashboardMode === "rides" && <section className={denseRideRows ? "panel ride-panel dense-rides" : "panel ride-panel"}>
             <div className="section-head">
               <div>
                 <h3>Ride Wait Times</h3>
@@ -2060,154 +2265,182 @@ export function ParkDashboard() {
                 </p>
               </div>
             </div>
-            {favoriteRides.length > 0 && (
-              <section className="insight-block">
-                <div className="insight-head">
-                  <h4>Your Favorites Right Now</h4>
-                  <span>{favoriteRides.length} saved</span>
-                </div>
-                <div className="favorite-dashboard">
-                  {favoriteRides.slice(0, 3).map((ride) => (
-                    <button className="insight-card" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
-                      <strong>{ride.name}</strong>
-                      <span>{minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}</span>
-                      {comparedWithNormalLabel(ride) && <small>{comparedWithNormalLabel(ride)}</small>}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-            {landFlowRecommendations.length > 0 && (
-              <section className="insight-block">
-                <div className="insight-head">
-                  <h4>Best Land Flow</h4>
-                  <span>Stay nearby</span>
-                </div>
-                <div className="flow-grid">
-                  {landFlowRecommendations.map((flow) => (
-                    <button
-                      className="flow-card"
-                      key={flow.landName}
-                      onClick={() => {
-                        trackEvent("land_flow_start", flow.landName);
-                        openRideDetails(flow.rides[0]);
-                      }}
-                      type="button"
-                    >
-                      <strong>{flow.landName}</strong>
-                      <span>{flow.rides.map((ride) => ride.name).join(" -> ")}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-            <section className="insight-block">
-              <div className="insight-head">
-                <h4>Predictive Wait Windows</h4>
-                <span>{predictionWindows.length > 0 ? "Now vs later" : "Learning"}</span>
+            <div className="wait-controls">
+              <label className="search-field">
+                <span>Search rides</span>
+                <input
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search attractions"
+                  type="search"
+                  value={searchQuery}
+                />
+              </label>
+              <div className="sort-strip" role="group" aria-label="Sort and filter ride wait times">
+                <button
+                  className={rideSort === "land" ? "sort-pill active" : "sort-pill"}
+                  onClick={() => setRideSort("land")}
+                  type="button"
+                >
+                  By land
+                </button>
+                <button
+                  className={rideSort === "wait-asc" ? "sort-pill active" : "sort-pill"}
+                  onClick={() => setRideSort("wait-asc")}
+                  type="button"
+                >
+                  Short waits
+                </button>
+                <button
+                  className={rideSort === "wait-desc" ? "sort-pill active" : "sort-pill"}
+                  onClick={() => setRideSort("wait-desc")}
+                  type="button"
+                >
+                  Long waits
+                </button>
+                <button
+                  className={rideSort === "alpha" ? "sort-pill active" : "sort-pill"}
+                  onClick={() => setRideSort("alpha")}
+                  type="button"
+                >
+                  A-Z
+                </button>
+                <button
+                  className={rideSort === "favorites" ? "sort-pill active" : "sort-pill"}
+                  onClick={() => setRideSort("favorites")}
+                  type="button"
+                >
+                  Favorites first
+                </button>
+                <button
+                  className={favoritesOnly ? "sort-pill active filter-pill" : "sort-pill filter-pill"}
+                  onClick={() => setFavoritesOnly((current) => !current)}
+                  type="button"
+                >
+                  Favorites only
+                </button>
+                <button
+                  aria-pressed={showHiddenRides}
+                  className={showHiddenRides ? "sort-pill active filter-pill" : "sort-pill filter-pill"}
+                  onClick={() => setShowHiddenRides((current) => !current)}
+                  type="button"
+                >
+                  Hide {noGoRideIds.length > 0 ? `(${noGoRideIds.length})` : ""}
+                </button>
+                <button
+                  aria-pressed={denseRideRows}
+                  className={denseRideRows ? "sort-pill active filter-pill" : "sort-pill filter-pill"}
+                  onClick={() => setDenseRideRows((current) => !current)}
+                  type="button"
+                >
+                  Dense
+                </button>
               </div>
-              {predictionWindows.length > 0 ? (
-                <div className="favorite-dashboard">
-                  {predictionWindows.map(({ ride, prediction }) => (
-                    <button className={`insight-card insight-${prediction.tone}`} key={ride.id} onClick={() => openRideDetails(ride)} type="button">
-                      <strong>{ride.name}</strong>
-                      <span>{prediction.headline}</span>
-                      <small>{prediction.detail}</small>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">Prediction windows appear after the app has enough same-hour movement to compare.</p>
-              )}
-            </section>
-            <section className="insight-block">
-              <div className="insight-head">
-                <h4>Best Bets Right Now</h4>
-                <span>{bestBets.length > 0 ? "Below normal" : "Learning"}</span>
-              </div>
-              {bestBets.length > 0 ? (
-                <div className="favorite-dashboard">
-                  {bestBets.map(({ ride, advantage }) => (
-                    <button className="insight-card" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
-                      <strong>{ride.name}</strong>
-                      <span>{minutesLabel(ride.waitTime, ride.isOpen)}</span>
-                      <small>{advantage} min below normal</small>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">Best bets will appear once the app has enough same-hour history to compare rides fairly.</p>
-              )}
-            </section>
-            {notableChanges.length > 0 && (
-              <section className="insight-block">
-                <div className="insight-head">
-                  <h4>What Changed</h4>
-                  <span>Last hour</span>
-                </div>
-                <div className="change-list">
-                  {notableChanges.map((ride) => (
-                    <button className="change-chip" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
-                      <strong>{ride.name}</strong>
-                      <span>{changeLabel(ride)}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-            <div className="sort-strip" role="group" aria-label="Sort and filter ride wait times">
-              <button
-                className={rideSort === "land" ? "sort-pill active" : "sort-pill"}
-                onClick={() => setRideSort("land")}
-                type="button"
-              >
-                By land
-              </button>
-              <button
-                className={rideSort === "wait-asc" ? "sort-pill active" : "sort-pill"}
-                onClick={() => setRideSort("wait-asc")}
-                type="button"
-              >
-                Short waits
-              </button>
-              <button
-                className={rideSort === "wait-desc" ? "sort-pill active" : "sort-pill"}
-                onClick={() => setRideSort("wait-desc")}
-                type="button"
-              >
-                Long waits
-              </button>
-              <button
-                className={rideSort === "alpha" ? "sort-pill active" : "sort-pill"}
-                onClick={() => setRideSort("alpha")}
-                type="button"
-              >
-                A-Z
-              </button>
-              <button
-                className={rideSort === "favorites" ? "sort-pill active" : "sort-pill"}
-                onClick={() => setRideSort("favorites")}
-                type="button"
-              >
-                Favorites first
-              </button>
-              <button
-                className={favoritesOnly ? "sort-pill active filter-pill" : "sort-pill filter-pill"}
-                onClick={() => setFavoritesOnly((current) => !current)}
-                type="button"
-              >
-                Favorites only
-              </button>
             </div>
-            <label className="search-field">
-              <span>Search rides</span>
-              <input
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Search attractions"
-                type="search"
-                value={searchQuery}
-              />
-            </label>
+            <details className="ride-insights">
+              <summary>
+                <span>Insights</span>
+                <strong>
+                  {favoriteRides.length + landFlowRecommendations.length + predictionWindows.length + bestBets.length + notableChanges.length}
+                </strong>
+              </summary>
+              <div className="ride-insights-body">
+                {favoriteRides.length > 0 && (
+                  <section className="insight-block">
+                    <div className="insight-head">
+                      <h4>Your Favorites Right Now</h4>
+                      <span>{favoriteRides.length} saved</span>
+                    </div>
+                    <div className="favorite-dashboard">
+                      {favoriteRides.slice(0, 3).map((ride) => (
+                        <button className="insight-card" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                          <strong>{ride.name}</strong>
+                          <span>{minutesLabel(ride.waitTime, ride.isOpen) ?? statusLabel(ride)}</span>
+                          {comparedWithNormalLabel(ride) && <small>{comparedWithNormalLabel(ride)}</small>}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                {landFlowRecommendations.length > 0 && (
+                  <section className="insight-block">
+                    <div className="insight-head">
+                      <h4>Best Land Flow</h4>
+                      <span>Stay nearby</span>
+                    </div>
+                    <div className="flow-grid">
+                      {landFlowRecommendations.map((flow) => (
+                        <button
+                          className="flow-card"
+                          key={flow.landName}
+                          onClick={() => {
+                            trackEvent("land_flow_start", flow.landName);
+                            openRideDetails(flow.rides[0]);
+                          }}
+                          type="button"
+                        >
+                          <strong>{flow.landName}</strong>
+                          <span>{flow.rides.map((ride) => ride.name).join(" -> ")}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                <section className="insight-block">
+                  <div className="insight-head">
+                    <h4>Predictive Wait Windows</h4>
+                    <span>{predictionWindows.length > 0 ? "Now vs later" : "Learning"}</span>
+                  </div>
+                  {predictionWindows.length > 0 ? (
+                    <div className="favorite-dashboard">
+                      {predictionWindows.map(({ ride, prediction }) => (
+                        <button className={`insight-card insight-${prediction.tone}`} key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                          <strong>{ride.name}</strong>
+                          <span>{prediction.headline}</span>
+                          <small>{prediction.detail}</small>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">Prediction windows appear after the app has enough same-hour movement to compare.</p>
+                  )}
+                </section>
+                <section className="insight-block">
+                  <div className="insight-head">
+                    <h4>Best Bets Right Now</h4>
+                    <span>{bestBets.length > 0 ? "Below normal" : "Learning"}</span>
+                  </div>
+                  {bestBets.length > 0 ? (
+                    <div className="favorite-dashboard">
+                      {bestBets.map(({ ride, advantage }) => (
+                        <button className="insight-card" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                          <strong>{ride.name}</strong>
+                          <span>{minutesLabel(ride.waitTime, ride.isOpen)}</span>
+                          <small>{advantage} min below normal</small>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">Best bets will appear once the app has enough same-hour history to compare rides fairly.</p>
+                  )}
+                </section>
+                {notableChanges.length > 0 && (
+                  <section className="insight-block">
+                    <div className="insight-head">
+                      <h4>What Changed</h4>
+                      <span>Last hour</span>
+                    </div>
+                    <div className="change-list">
+                      {notableChanges.map((ride) => (
+                        <button className="change-chip" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                          <strong>{ride.name}</strong>
+                          <span>{changeLabel(ride)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
+            </details>
             {filteredLands.length === 0 ? (
               <p className="muted">
                 {favoritesOnly
@@ -2226,9 +2459,10 @@ export function ParkDashboard() {
                       {land.rides.map((ride) => {
                         const favorite = favorites.includes(ride.id);
                         const prediction = getRidePrediction(ride);
+                        const hidden = noGoRideIds.includes(ride.id);
                         return (
                           <article
-                            className={`${favorite ? "ride-row favorite-row" : "ride-row"} ${changeLabel(ride) ? "ride-live-change" : ""} ${rideVisualClass(ride, prediction)}`}
+                            className={`${favorite ? "ride-row favorite-row" : "ride-row"} ${hidden ? "no-go-row" : ""} ${changeLabel(ride) ? "ride-live-change" : ""} ${rideVisualClass(ride, prediction)}`}
                             key={ride.id}
                           >
                             <button
@@ -2255,6 +2489,7 @@ export function ParkDashboard() {
                                   <strong>{ride.name}</strong>
                                   <div className="ride-intel">
                                     <span className={recommendationClass(prediction)}>{prediction.headline}</span>
+                                    {hidden && <small>Hidden</small>}
                                     {compactNormalLabel(ride) && <small>{compactNormalLabel(ride)}</small>}
                                     {changeLabel(ride) && <small>{changeLabel(ride)}</small>}
                                   </div>
@@ -2303,7 +2538,7 @@ export function ParkDashboard() {
                 onClick={closeRideDetails}
                 type="button"
               >
-                ×
+                Back
               </button>
             </div>
 
@@ -2361,7 +2596,7 @@ export function ParkDashboard() {
                 onClick={() => toggleNoGoRide(selectedRide.id)}
                 type="button"
               >
-                {noGoRideIds.includes(selectedRide.id) ? "Allow recs" : "No-go"}
+                {noGoRideIds.includes(selectedRide.id) ? "Show" : "Hide"}
               </button>
             </div>
 
@@ -2501,7 +2736,7 @@ function weatherDecisionLabel(weather: WeatherResponse | null) {
   const temperature = weather?.current?.temperature_2m;
   if (chance >= 50) return `${chance}% rain soon`;
   if (chance >= 25) return `${chance}% rain watch`;
-  if (typeof temperature === "number") return `${Math.round(temperature)} deg now`;
+  if (typeof temperature === "number") return `${Math.round(temperature)}°F now`;
   return "Weather loading";
 }
 

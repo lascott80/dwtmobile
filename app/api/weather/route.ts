@@ -13,6 +13,7 @@ export async function GET(request: Request) {
     url.searchParams.set("longitude", String(park.longitude));
     url.searchParams.set("current", "temperature_2m,precipitation,weather_code");
     url.searchParams.set("hourly", "precipitation_probability,precipitation");
+    url.searchParams.set("temperature_unit", "fahrenheit");
     url.searchParams.set("forecast_days", "1");
     url.searchParams.set("timezone", "America/New_York");
 

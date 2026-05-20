@@ -223,16 +223,36 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
       )
       .all(park.slug) as ShowTimeItem[];
 
-    const meetGreets = database
+    const meetGreets = (database
       .prepare(
         `
-          SELECT entertainment_id AS id, name, start_time AS startTime, end_time AS endTime, status
-          FROM showtimes
-          WHERE park_slug = ? AND category = 'meet-greet'
-          ORDER BY start_time, name
+          SELECT
+            s.entertainment_id AS id,
+            s.name,
+            s.start_time AS startTime,
+            s.end_time AS endTime,
+            s.status,
+            latest.wait_time AS waitTime,
+            latest.is_open AS isOpen
+          FROM showtimes s
+          LEFT JOIN wait_snapshots latest
+            ON latest.attraction_id = s.entertainment_id
+            AND latest.park_slug = s.park_slug
+            AND latest.captured_at = (
+              SELECT MAX(ws.captured_at)
+              FROM wait_snapshots ws
+              WHERE ws.attraction_id = s.entertainment_id
+                AND ws.park_slug = s.park_slug
+            )
+          WHERE s.park_slug = ? AND s.category = 'meet-greet'
+          ORDER BY startTime, name
         `
       )
-      .all(park.slug) as ShowTimeItem[];
+      .all(park.slug) as Array<ShowTimeItem & { isOpen: number | null }>)
+      .map((show) => ({
+        ...show,
+        isOpen: show.isOpen === null ? null : Boolean(show.isOpen)
+      }));
 
     const rides = database
       .prepare(
