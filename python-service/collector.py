@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import sqlite3
 import sys
 import time
@@ -13,12 +14,15 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "disney_wait_times.db"
 EASTERN = ZoneInfo("America/New_York")
 LOGGER = logging.getLogger("dwtmobile.collector")
+FETCH_TIMEOUT_SECONDS = 15
+FETCH_ATTEMPTS = 3
+RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 NON_RIDE_ATTRACTION_NAMES = {
     "maharajah jungle trek",
     "beauty and the beast sing-along",
@@ -239,6 +243,12 @@ def normalize_name(value: str) -> str:
     return "".join(ch.lower() for ch in value if ch.isalnum())
 
 
+def is_retryable_fetch_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRYABLE_STATUS_CODES
+    return isinstance(exc, (TimeoutError, urllib.error.URLError))
+
+
 def fetch_json(url: str) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -247,8 +257,20 @@ def fetch_json(url: str) -> dict[str, Any]:
             "Accept": "application/json",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    last_error: Optional[Exception] = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            last_error = exc
+            if attempt >= FETCH_ATTEMPTS or not is_retryable_fetch_error(exc):
+                raise
+            sleep_for = min(6.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.35)
+            LOGGER.debug("Retrying %s after %s: attempt %s/%s", url, exc, attempt + 1, FETCH_ATTEMPTS)
+            time.sleep(sleep_for)
+
+    raise last_error or RuntimeError("Fetch failed without an exception")
 
 
 def fetch_json_with_telemetry(
@@ -282,6 +304,27 @@ def fetch_json_with_telemetry(
         (park_slug, source, checked_at, duration_ms),
     )
     return payload
+
+
+def fetch_optional_json_with_telemetry(
+    connection: sqlite3.Connection,
+    *,
+    park_slug: str,
+    source: str,
+    url: str,
+    errors: list[str],
+) -> Optional[dict[str, Any]]:
+    try:
+        return fetch_json_with_telemetry(
+            connection,
+            park_slug=park_slug,
+            source=source,
+            url=url,
+        )
+    except Exception as exc:
+        errors.append(f"{source}: {exc}")
+        LOGGER.warning("Optional source failed for %s (%s): %s", park_slug, source, exc)
+        return None
 
 
 def build_queue_times_map(queue_times_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -472,7 +515,11 @@ def replace_restaurants(connection: sqlite3.Connection, park: ParkConfig, captur
     )
 
 
-def fetch_osm_facilities(connection: sqlite3.Connection, park: ParkConfig, children_payload: dict[str, Any]) -> dict[str, Any]:
+def fetch_osm_facilities(
+    connection: sqlite3.Connection,
+    park: ParkConfig,
+    children_payload: dict[str, Any],
+) -> Optional[dict[str, Any]]:
     points = [
         item.get("location")
         for item in children_payload.get("children", [])
@@ -514,7 +561,8 @@ def fetch_osm_facilities(connection: sqlite3.Connection, park: ParkConfig, child
             """,
             (park.slug, checked_at, duration_ms, str(exc)),
         )
-        return {"elements": []}
+        LOGGER.warning("Optional source failed for %s (osm-overpass): %s", park.slug, exc)
+        return None
     duration_ms = int((time.monotonic() - started) * 1000)
     connection.execute(
         """
@@ -595,6 +643,7 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
     captured_at = polled_at.isoformat()
     ride_count = 0
     meet_greet_count = 0
+    optional_errors: list[str] = []
 
     LOGGER.info("Polling %s", park.short_name)
 
@@ -609,34 +658,46 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
     connection.commit()
 
     try:
-        queue_times_payload = fetch_json_with_telemetry(
-            connection,
-            park_slug=park.slug,
-            source="queue-times",
-            url=f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json",
-        )
         themeparks_live = fetch_json_with_telemetry(
             connection,
             park_slug=park.slug,
             source="themeparks-live",
             url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/live",
         )
-        themeparks_schedule = fetch_json_with_telemetry(
+        if not isinstance(themeparks_live.get("liveData"), list):
+            raise ValueError("themeparks-live response did not include liveData")
+        queue_times_payload = fetch_optional_json_with_telemetry(
+            connection,
+            park_slug=park.slug,
+            source="queue-times",
+            url=f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json",
+            errors=optional_errors,
+        )
+        themeparks_schedule = fetch_optional_json_with_telemetry(
             connection,
             park_slug=park.slug,
             source="themeparks-schedule",
             url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule",
+            errors=optional_errors,
         )
-        themeparks_children = fetch_json_with_telemetry(
+        themeparks_children = fetch_optional_json_with_telemetry(
             connection,
             park_slug=park.slug,
             source="themeparks-children",
             url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/children",
+            errors=optional_errors,
         )
+        osm_facilities = None
+        if themeparks_children is not None:
+            osm_facilities = fetch_osm_facilities(connection, park, themeparks_children)
+            if osm_facilities is None:
+                optional_errors.append("osm-overpass: unavailable")
+        connection.commit()
 
-        qt_by_name = build_queue_times_map(queue_times_payload)
-        children_by_id = {item.get("id"): item for item in themeparks_children.get("children", [])}
+        qt_by_name = build_queue_times_map(queue_times_payload or {})
+        children_by_id = {item.get("id"): item for item in (themeparks_children or {}).get("children", [])}
 
+        connection.execute("SAVEPOINT park_refresh")
         for item in themeparks_live.get("liveData", []):
             entity_type = item.get("entityType", "UNKNOWN")
             name = item.get("name", "")
@@ -713,29 +774,40 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
                 )
                 meet_greet_count += 1
 
-        replace_schedule(connection, park.slug, captured_at, themeparks_schedule)
+        if themeparks_schedule is not None:
+            replace_schedule(connection, park.slug, captured_at, themeparks_schedule)
         replace_showtimes(connection, park, captured_at, themeparks_live)
-        replace_restaurants(connection, park, captured_at, themeparks_children)
-        replace_facilities(connection, park, captured_at, fetch_osm_facilities(connection, park, themeparks_children))
+        if themeparks_children is not None:
+            replace_restaurants(connection, park, captured_at, themeparks_children)
+            if osm_facilities is not None:
+                replace_facilities(connection, park, captured_at, osm_facilities)
 
+        last_error = "; ".join(optional_errors)[:500] if optional_errors else None
         connection.execute(
             """
             UPDATE refresh_state
-            SET last_success_at = ?, last_error = NULL
+            SET last_success_at = ?, last_error = ?
             WHERE park_slug = ?
             """,
-            (captured_at, park.slug),
+            (captured_at, last_error, park.slug),
         )
+        connection.execute("RELEASE SAVEPOINT park_refresh")
         connection.commit()
         LOGGER.info(
-            "Updated %s: %s rides, %s meet-and-greets",
+            "Updated %s: %s rides, %s meet-and-greets%s",
             park.short_name,
             ride_count,
             meet_greet_count,
+            " with optional source failures" if optional_errors else "",
         )
         return True
 
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+    except Exception as exc:
+        try:
+            connection.execute("ROLLBACK TO SAVEPOINT park_refresh")
+            connection.execute("RELEASE SAVEPOINT park_refresh")
+        except sqlite3.Error:
+            pass
         connection.execute(
             "UPDATE refresh_state SET last_error = ? WHERE park_slug = ?",
             (str(exc), park.slug),

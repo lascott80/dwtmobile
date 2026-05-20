@@ -32,6 +32,7 @@ const NO_GO_KEY = "dwtmobile:no-go-rides";
 const PREFERENCE_PROFILE_KEY = "dwtmobile:preference-profile";
 const TRIP_MEMORY_KEY = "dwtmobile:trip-memory";
 const SYNC_CODE_KEY = "dwtmobile:sync-code";
+const API_FETCH_TIMEOUT_MS = 10_000;
 const NON_RECOMMENDED_RIDE_NAMES = new Set([
   "A Pirate's Adventure ~ Treasures of the Seven Seas",
   "Swiss Family Treehouse",
@@ -237,6 +238,41 @@ function normalizeParkData(park: Partial<ParkDetailResponse>): ParkDetailRespons
     facilities: park.facilities ?? [],
     lands: park.lands ?? []
   };
+}
+
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs = API_FETCH_TIMEOUT_MS): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+    return (await response.json()) as T;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function isParkMetaResponse(value: unknown): value is ParkMetaResponse {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      Array.isArray((value as ParkMetaResponse).parks) &&
+      typeof (value as ParkMetaResponse).generatedAt === "string"
+  );
+}
+
+function isParkDetailResponse(value: unknown): value is ParkDetailResponse {
+  const maybePark = value as Partial<ParkDetailResponse> | null;
+  return Boolean(
+    maybePark &&
+      typeof maybePark === "object" &&
+      maybePark.park &&
+      typeof maybePark.park.slug === "string" &&
+      maybePark.status &&
+      Array.isArray(maybePark.lands)
+  );
 }
 
 function comparedWithNormalLabel(ride: RideItem) {
@@ -664,9 +700,9 @@ export function ParkDashboard() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/meta")
-      .then((response) => response.json())
-      .then((data: ParkMetaResponse) => {
+    fetchJsonWithTimeout<unknown>("/api/meta")
+      .then((data) => {
+        if (!isParkMetaResponse(data)) throw new Error("Invalid park meta response");
         setMeta(data);
         if (!data.parks.find((park) => park.slug === activePark) && data.parks[0]) {
           setActivePark(data.parks[0].slug);
@@ -683,25 +719,36 @@ export function ParkDashboard() {
     }
 
     return Promise.all([
-      fetch(`/api/parks/${slug}`).then((response) => response.json()),
-      fetch("/api/meta").then((response) => response.json())
+      fetchJsonWithTimeout<unknown>(`/api/parks/${slug}`),
+      fetchJsonWithTimeout<unknown>("/api/meta")
     ])
-      .then(([park, parkMeta]: [ParkDetailResponse, ParkMetaResponse]) => {
+      .then(([park, parkMeta]) => {
+        if (!isParkDetailResponse(park) || !isParkMetaResponse(parkMeta)) {
+          throw new Error("Invalid park API response");
+        }
         const normalizedPark = normalizeParkData(park);
         notifyFavoriteChanges(previousRidesRef.current, normalizedPark);
         setParkData(normalizedPark);
         setMeta(parkMeta);
         setOfflineMode(false);
-        window.localStorage.setItem(
-          `${PARK_CACHE_KEY}:${slug}`,
-          JSON.stringify({
-            park: normalizedPark,
-            meta: parkMeta,
-            cachedAt: new Date().toISOString()
-          })
-        );
+        try {
+          window.localStorage.setItem(
+            `${PARK_CACHE_KEY}:${slug}`,
+            JSON.stringify({
+              park: normalizedPark,
+              meta: parkMeta,
+              cachedAt: new Date().toISOString()
+            })
+          );
+        } catch {
+          // Keep the live UI usable even if browser storage is full or unavailable.
+        }
       })
       .catch(() => {
+        if (quiet && parkData?.park.slug === slug) {
+          setOfflineMode(true);
+          return;
+        }
         const raw = window.localStorage.getItem(`${PARK_CACHE_KEY}:${slug}`);
         if (!raw) return;
         try {
@@ -709,6 +756,7 @@ export function ParkDashboard() {
             park: Partial<ParkDetailResponse>;
             meta: ParkMetaResponse;
           };
+          if (!isParkMetaResponse(cached.meta)) throw new Error("Invalid cached meta");
           setParkData(normalizeParkData(cached.park));
           setMeta(cached.meta);
           setOfflineMode(true);
@@ -730,8 +778,7 @@ export function ParkDashboard() {
   }, [activePark]);
 
   useEffect(() => {
-    void fetch(`/api/weather?parkSlug=${activePark}`)
-      .then((response) => response.json())
+    void fetchJsonWithTimeout<WeatherResponse>(`/api/weather?parkSlug=${activePark}`, 6_000)
       .then((data: WeatherResponse) => setWeather(data))
       .catch(() => setWeather(null));
   }, [activePark]);
@@ -1829,7 +1876,7 @@ export function ParkDashboard() {
             </section>
           )}
 
-          {dashboardMode !== "rides" && <section className={`panel command-card pulse-${parkData.crowdPulse.level}`}>
+          {dashboardMode === "today" && <section className={`panel command-card pulse-${parkData.crowdPulse.level}`}>
             <div className="command-head">
               <div>
                 <p>Today in {parkData.park.shortName}</p>
@@ -1878,12 +1925,6 @@ export function ParkDashboard() {
                 <button onClick={() => setRideDayState(parkCopilot.ride.id, "done")} type="button">
                   Done
                 </button>
-                <button onClick={() => setRideDayState(parkCopilot.ride.id, "skip")} type="button">
-                  Skip
-                </button>
-                <button onClick={() => enableAlert(parkCopilot.ride.id)} type="button">
-                  {alertThresholds[parkCopilot.ride.id] ? "Alert on" : "Alert"}
-                </button>
                 <button onClick={() => openRideDetails(parkCopilot.ride)} type="button">
                   Details
                 </button>
@@ -1910,60 +1951,6 @@ export function ParkDashboard() {
                 )}
               </div>
             )}
-            {smartMoves.length > 0 && (
-              <div className="smart-move-grid" aria-label="Smart options for today">
-                {smartMoves.map((move) =>
-                  "ride" in move ? (
-                    <button className={`smart-move smart-${move.tone}`} key={move.key} onClick={() => openRideDetails(move.ride)} type="button">
-                      <span className={`with-icon icon-${move.tone}`}>
-                        {move.tone === "ride" ? <Navigation size={13} /> : <MapPinned size={13} />}
-                        {move.label}
-                      </span>
-                      <strong>{move.title}</strong>
-                      <small>{move.detail}</small>
-                    </button>
-                  ) : (
-                    <article className={`smart-move smart-${move.tone}`} key={move.key}>
-                      <span className={`with-icon icon-${move.tone}`}>
-                        {move.tone === "character" ? <UsersRound size={13} /> : <Ticket size={13} />}
-                        {move.label}
-                      </span>
-                      <strong>{move.title}</strong>
-                      <small>{move.detail}</small>
-                    </article>
-                  )
-                )}
-              </div>
-            )}
-            <div className="command-grid">
-              <article>
-                <small>Best now</small>
-                <strong>{bestFavorite?.name ?? bestBets[0]?.ride.name ?? "Building"}</strong>
-                <span>
-                  {bestFavorite
-                    ? minutesLabel(bestFavorite.waitTime, bestFavorite.isOpen) ?? statusLabel(bestFavorite)
-                    : bestBets[0]
-                      ? `${bestBets[0].advantage} min below normal`
-                      : "More history needed"}
-                </span>
-              </article>
-              <article>
-                <small>Next show</small>
-                <strong>{nextFeaturedShow?.name ?? "No show ahead"}</strong>
-                <span>{nextFeaturedShow ? formatTime(nextFeaturedShow.startTime) : "—"}</span>
-              </article>
-            </div>
-            <div className="command-chips">
-              <button onClick={enablePushAlerts} type="button">
-                Alerts {pushAlertsEnabled ? "on" : "off"}
-              </button>
-              <button onClick={() => setDashboardMode("my-day")} type="button">
-                {PROFILE_LABELS[preferenceProfile]}
-              </button>
-              <button onClick={syncCode ? sharePreferenceSync : savePreferenceSync} type="button">
-                {syncCode ? `Sync ${syncCode}` : "Sync setup"}
-              </button>
-            </div>
           </section>}
 
           <nav className="mode-tabs" aria-label="Dashboard sections">
@@ -1986,7 +1973,71 @@ export function ParkDashboard() {
           </nav>
 
           {dashboardMode === "today" && (
-            <>
+            <div className="today-content">
+              {smartMoves.length > 0 && (
+                <section className="panel today-options">
+                  <div className="utility-head">
+                    <p>Good options</p>
+                    <strong>Pick from a short list</strong>
+                  </div>
+                  <div className="smart-move-grid" aria-label="Smart options for today">
+                    {smartMoves.map((move) =>
+                      "ride" in move ? (
+                        <button className={`smart-move smart-${move.tone}`} key={move.key} onClick={() => openRideDetails(move.ride)} type="button">
+                          <span className={`with-icon icon-${move.tone}`}>
+                            {move.tone === "ride" ? <Navigation size={13} /> : <MapPinned size={13} />}
+                            {move.label}
+                          </span>
+                          <strong>{move.title}</strong>
+                          <small>{move.detail}</small>
+                        </button>
+                      ) : (
+                        <article className={`smart-move smart-${move.tone}`} key={move.key}>
+                          <span className={`with-icon icon-${move.tone}`}>
+                            {move.tone === "character" ? <UsersRound size={13} /> : <Ticket size={13} />}
+                            {move.label}
+                          </span>
+                          <strong>{move.title}</strong>
+                          <small>{move.detail}</small>
+                        </article>
+                      )
+                    )}
+                  </div>
+                </section>
+              )}
+              {(bestBets.length > 0 || shortWaitRides.length > 0 || nextFeaturedShow) && (
+                <section className="panel today-quicklook">
+                  <div className="utility-head">
+                    <p>Quick read</p>
+                    <strong>Best signals right now</strong>
+                  </div>
+                  <div className="command-grid">
+                    <article>
+                      <small>Best value</small>
+                      <strong>{bestFavorite?.name ?? bestBets[0]?.ride.name ?? shortWaitRides[0]?.name ?? "Building"}</strong>
+                      <span>
+                        {bestFavorite
+                          ? minutesLabel(bestFavorite.waitTime, bestFavorite.isOpen) ?? statusLabel(bestFavorite)
+                          : bestBets[0]
+                            ? `${bestBets[0].advantage} min below normal`
+                            : shortWaitRides[0]
+                              ? minutesLabel(shortWaitRides[0].waitTime, shortWaitRides[0].isOpen)
+                              : "More history needed"}
+                      </span>
+                    </article>
+                    <article>
+                      <small>Short waits</small>
+                      <strong>{shortWaitRides.length}</strong>
+                      <span>20 min or less</span>
+                    </article>
+                    <article>
+                      <small>Next show</small>
+                      <strong>{nextFeaturedShow?.name ?? "No show ahead"}</strong>
+                      <span>{nextFeaturedShow ? formatTime(nextFeaturedShow.startTime) : "—"}</span>
+                    </article>
+                  </div>
+                </section>
+              )}
               {snipes.length > 0 && (
                 <section className="panel snipe-card">
                   <div className="utility-head">
@@ -2033,7 +2084,22 @@ export function ParkDashboard() {
                   </details>
                 </section>
               )}
-            </>
+              {parkData.meetGreets.length > 0 && <section className="panel compact-info-panel info-characters">
+                <details>
+                  <summary><span className="with-icon icon-character"><UsersRound size={14} />Character Meet &amp; Greet Times</span></summary>
+                  <div className="details-body">
+                    <div className="show-grid">
+                      {parkData.meetGreets.map((show) => (
+                        <article className="show-card" key={`${show.id}-${show.startTime}`}>
+                          <strong>{show.name}</strong>
+                          <span>{meetGreetDetail(show)}</span>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                </details>
+              </section>}
+            </div>
           )}
 
           {dashboardMode === "my-day" && <section className="panel agenda-card">
@@ -2048,6 +2114,7 @@ export function ParkDashboard() {
             <div className="agenda-actions">
               <button onClick={startPartyDay} type="button">{partyDay ? "Rename party" : "Start party"}</button>
               <button onClick={shareRecap} disabled={sharingRecap} type="button">{sharingRecap ? "Preparing" : "Share recap"}</button>
+              <button onClick={enablePushAlerts} type="button">Push alerts {pushAlertsEnabled ? "on" : "off"}</button>
             </div>
             <div className="preference-strip" aria-label="Trip style">
               {(Object.keys(PROFILE_LABELS) as PreferenceProfile[]).map((profile) => (
@@ -2103,6 +2170,11 @@ export function ParkDashboard() {
                 <button onClick={() => void enableRideAlerts(favoriteRides, 25)} type="button"><Bell size={14} />Favorites under 25</button>
                 <button onClick={() => void enableRideAlerts(mustDoRides, 30)} type="button"><Star size={14} />Must-do under 30</button>
                 <button onClick={() => void enableRideAlerts(bestBets.map(({ ride }) => ride), 25)} type="button"><Sparkles size={14} />Best bets under 25</button>
+                {parkCopilot && (
+                  <button onClick={() => enableAlert(parkCopilot.ride.id)} type="button">
+                    <Navigation size={14} />Next move alert
+                  </button>
+                )}
                 <button onClick={clearParkAlerts} type="button"><Filter size={14} />Clear park alerts</button>
               </div>
             </div>
@@ -2275,22 +2347,6 @@ export function ParkDashboard() {
             <div className="restaurant-strip">
               {parkData.facilities.slice(0, 4).map((facility) => <span key={facility.id}>{facility.name}</span>)}
             </div>
-          </section>}
-
-          {dashboardMode === "today" && parkData.meetGreets.length > 0 && <section className="panel compact-info-panel info-characters">
-            <details>
-              <summary><span className="with-icon icon-character"><UsersRound size={14} />Character Meet &amp; Greet Times</span></summary>
-              <div className="details-body">
-                <div className="show-grid">
-                  {parkData.meetGreets.map((show) => (
-                    <article className="show-card" key={`${show.id}-${show.startTime}`}>
-                      <strong>{show.name}</strong>
-                      <span>{meetGreetDetail(show)}</span>
-                    </article>
-                  ))}
-                </div>
-              </div>
-            </details>
           </section>}
 
           {dashboardMode === "rides" && <section className={denseRideRows ? "panel ride-panel dense-rides" : "panel ride-panel"}>

@@ -214,7 +214,7 @@ summary,
 .today-card {
   position: relative;
   display: grid;
-  gap: 10px;
+  gap: 12px;
   margin-top: 10px;
   margin-bottom: 18px;
   padding: 14px;
@@ -226,27 +226,13 @@ summary,
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(circle at 86% 0%, var(--park-surface-glow), transparent 36%),
-    linear-gradient(135deg, var(--park-surface-tint), transparent 42%);
-  opacity: .9;
+  background: linear-gradient(135deg, var(--park-surface-tint), transparent 46%);
+  opacity: .72;
 }
 
 .command-card > * {
   position: relative;
   z-index: 1;
-}
-
-.command-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--park-accent) 18%, transparent) 0 18%, transparent 18%),
-    linear-gradient(225deg, color-mix(in srgb, var(--park-accent-2) 16%, transparent) 0 20%, transparent 20%),
-    repeating-linear-gradient(90deg, transparent 0 27px, rgba(255,255,255,.34) 27px 28px);
-  opacity: .76;
 }
 
 .command-card::after {
@@ -257,7 +243,7 @@ summary,
   width: 86px;
   height: 48px;
   pointer-events: none;
-  opacity: .34;
+  opacity: .22;
   background: var(--park-accent);
   clip-path: polygon(0 100%, 10% 58%, 22% 58%, 30% 28%, 42% 58%, 54% 58%, 64% 18%, 76% 58%, 88% 58%, 100% 100%);
 }
@@ -368,13 +354,13 @@ summary,
   gap: 6px;
   width: 100%;
   border: 0;
-  border-radius: 18px;
+  border-radius: 16px;
   position: relative;
   overflow: hidden;
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--park-accent) 92%, #111) 0%, var(--park-ink) 58%, #18181a 100%);
   color: white;
-  padding: 14px 16px;
+  padding: 16px;
   text-align: left;
   box-shadow:
     0 14px 26px color-mix(in srgb, var(--park-accent) 20%, transparent),
@@ -450,8 +436,9 @@ summary,
 .command-primary strong {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 1.14rem;
+  white-space: normal;
+  font-size: 1.22rem;
+  line-height: 1.08;
   letter-spacing: 0;
 }
 
@@ -507,7 +494,7 @@ summary,
 
 .command-actions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
 }
 
@@ -519,7 +506,7 @@ summary,
   color: color-mix(in srgb, var(--park-accent) 52%, var(--ink));
   min-width: 0;
   padding: 8px 6px;
-  font-size: .72rem;
+  font-size: .76rem;
   font-weight: 850;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
 }
@@ -569,7 +556,7 @@ summary,
 
 .smart-move-grid {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -578,9 +565,8 @@ summary,
   gap: 4px;
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.96), rgba(250,250,248,.86));
+  border-radius: 12px;
+  background: rgba(255,255,255,.9);
   color: inherit;
   padding: 10px;
   text-align: left;
@@ -592,6 +578,17 @@ summary,
   border-color: color-mix(in srgb, var(--park-accent) 22%, var(--line));
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--park-accent) 10%, white), rgba(255,255,255,.94));
+}
+
+.today-content {
+  display: grid;
+  gap: 12px;
+}
+
+.today-options,
+.today-quicklook {
+  display: grid;
+  gap: 12px;
 }
 
 .smart-move span {
@@ -1283,7 +1280,7 @@ summary,
 
 .agenda-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1292,7 +1289,8 @@ summary,
   color: white;
 }
 
-.agenda-actions button:first-child {
+.agenda-actions button:first-child,
+.agenda-actions button:nth-child(3) {
   background: white;
   color: var(--ink);
   border: 1px solid var(--line);
@@ -2662,12 +2660,20 @@ h1 {
   line-height: 1.15;
 }
 
+.show-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .hour-chip span,
 .show-card span {
   color: var(--ink-soft);
   font-size: 0.78rem;
   font-weight: 750;
   line-height: 1.15;
+}
+
+.hour-chip span {
   white-space: nowrap;
 }
 
@@ -2682,11 +2688,18 @@ h1 {
     linear-gradient(180deg, rgba(255,255,255,.98), color-mix(in srgb, white 90%, var(--park-accent-2) 10%));
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  padding: 8px 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 7px;
+}
+
+.show-card span {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 details summary {
@@ -2734,16 +2747,13 @@ details summary {
   position: relative;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--park-accent) 8%, rgba(60, 60, 67, 0.1));
-  border-radius: 17px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.98), rgba(250,250,248,.9));
+  border-radius: 12px;
+  background: rgba(255,255,255,.94);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 2px;
-  box-shadow:
-    0 4px 14px rgba(23, 50, 77, .045),
-    inset 0 1px 0 rgba(255,255,255,.72);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.72);
   transition:
     background-color 160ms ease,
     border-color 160ms ease,
@@ -2754,7 +2764,7 @@ details summary {
 .ride-row:hover {
   border-color: color-mix(in srgb, var(--park-accent) 24%, var(--line));
   box-shadow:
-    0 8px 20px rgba(23, 50, 77, .08),
+    0 5px 14px rgba(23, 50, 77, .06),
     inset 0 1px 0 rgba(255,255,255,.76);
   transform: translateY(-1px);
 }
@@ -2833,8 +2843,8 @@ details summary {
   left: 0;
   top: 0;
   bottom: 0;
-  width: 5px;
-  border-radius: 17px 0 0 17px;
+  width: 4px;
+  border-radius: 12px 0 0 12px;
   background: color-mix(in srgb, var(--park-accent) 36%, rgba(60,60,67,.12));
   box-shadow: 0 0 0 rgba(0,0,0,0);
 }
@@ -2891,7 +2901,7 @@ details summary {
   width: 100%;
   border: 0;
   background: transparent;
-  padding: 11px 12px;
+  padding: 10px 12px 10px 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2907,9 +2917,9 @@ details summary {
 
 .ride-copy strong {
   display: block;
-  font-size: 0.98rem;
+  font-size: 0.94rem;
   line-height: 1.18;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .ride-text {
@@ -2923,7 +2933,8 @@ details summary {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  overflow: hidden;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
 .ride-intel small {
@@ -2974,9 +2985,10 @@ details summary {
 }
 
 .ride-side {
-  display: flex;
+  display: grid;
+  justify-items: end;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   flex: 0 0 auto;
 }
 
@@ -2985,19 +2997,17 @@ details summary {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-width: 94px;
+  min-width: 86px;
   text-align: center;
-  padding: 11px 14px;
-  border-radius: 18px;
+  padding: 10px 12px;
+  border-radius: 13px;
   font-weight: 900;
   font-size: 0.94rem;
   letter-spacing: -0.02em;
   line-height: 1;
   flex: 0 0 auto;
   border: 1px solid rgba(60, 60, 67, 0.1);
-  box-shadow:
-    inset 0 -1px 0 rgba(0, 0, 0, 0.08),
-    0 4px 12px rgba(20, 20, 20, 0.08);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.08);
 }
 
 .wait-pill > span,
@@ -3006,7 +3016,7 @@ details summary {
 }
 
 .wait-pill-live {
-  min-width: 102px;
+  min-width: 92px;
 }
 
 .wait-pill-soft,
@@ -3975,6 +3985,37 @@ details summary {
   }
 }
 
+@media (min-width: 760px) {
+  .shell {
+    max-width: 820px;
+    padding-inline: 22px;
+  }
+
+  .today-content {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .today-options,
+  .today-quicklook {
+    grid-column: 1 / -1;
+  }
+
+  .today-content .command-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .land-stack {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .agenda-actions,
+  .alert-preset-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (min-width: 900px) {
   body {
     background:
@@ -3983,7 +4024,7 @@ details summary {
   }
 
   .shell {
-    max-width: 900px;
+    max-width: 1180px;
     padding: calc(14px + var(--safe-top)) 22px 72px;
   }
 
@@ -4005,27 +4046,22 @@ details summary {
     padding: 10px 12px;
   }
 
-  .command-card {
-    max-width: 700px;
-    margin-left: auto;
-    margin-right: auto;
-  }
-
   .mode-tabs {
-    width: min(460px, calc(100vw - 44px));
+    width: min(520px, calc(100vw - 44px));
   }
 
   .mode-tabs button {
     padding: 8px 6px;
   }
 
+  .mode-today,
   .mode-rides,
   .mode-map,
   .mode-my-day {
     display: grid;
-    grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+    grid-template-columns: minmax(340px, 410px) minmax(0, 1fr);
     align-items: start;
-    gap: 0 22px;
+    gap: 0 24px;
     max-width: 1180px;
   }
 
@@ -4034,6 +4070,9 @@ details summary {
     max-width: 980px;
   }
 
+  .mode-today > .app-bar,
+  .mode-today > .park-tabs,
+  .mode-today > .footer-note,
   .mode-rides > .app-bar,
   .mode-rides > .park-tabs,
   .mode-rides > .footer-note,
@@ -4046,20 +4085,19 @@ details summary {
     grid-column: 1 / -1;
   }
 
-  .mode-rides > .command-card,
-  .mode-map > .command-card,
-  .mode-my-day > .command-card {
+  .mode-today > .command-card {
     position: sticky;
     top: calc(150px + var(--safe-top));
     grid-column: 1;
     max-width: none;
   }
 
+  .mode-today > .mode-tabs,
   .mode-rides > .mode-tabs,
   .mode-map > .mode-tabs,
   .mode-my-day > .mode-tabs {
     position: sticky;
-    top: calc(610px + var(--safe-top));
+    top: calc(560px + var(--safe-top));
     left: auto;
     bottom: auto;
     grid-column: 1;
@@ -4069,6 +4107,11 @@ details summary {
     box-shadow:
       0 12px 28px rgba(23, 50, 77, .11),
       inset 0 1px 0 rgba(255,255,255,.9);
+  }
+
+  .mode-today > .today-content {
+    grid-column: 2;
+    grid-row: 3 / span 8;
   }
 
   .mode-rides > .mode-tabs {
@@ -4083,7 +4126,7 @@ details summary {
   .mode-map > .in-park-card,
   .mode-map > .utility-card,
   .mode-my-day > .agenda-card {
-    grid-column: 2;
+    grid-column: 1 / -1;
   }
 
   .mode-rides > .ride-panel {
@@ -4101,7 +4144,8 @@ details summary {
   }
 
   .mode-map > .utility-card {
-    grid-row: 11;
+    grid-row: auto;
+    margin-top: 14px;
   }
 
   .ride-panel {
@@ -4110,6 +4154,15 @@ details summary {
 
   .favorite-dashboard {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .today-content .smart-move-grid,
+  .today-content .command-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .today-content .smart-ride {
+    grid-column: auto;
   }
 
   .land-stack {
@@ -4123,6 +4176,28 @@ details summary {
 
   .ride-row {
     break-inside: avoid;
+  }
+
+  .mode-map,
+  .mode-my-day {
+    display: block;
+    max-width: 980px;
+  }
+
+  .mode-map > .mode-tabs,
+  .mode-my-day > .mode-tabs {
+    position: static;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    width: min(520px, 100%);
+    margin: 12px auto 14px;
+  }
+
+  .mode-map > .in-park-card,
+  .mode-map > .utility-card,
+  .mode-my-day > .agenda-card {
+    margin-top: 14px;
   }
 
   .sheet-backdrop {
