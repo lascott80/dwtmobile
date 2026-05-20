@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -18,11 +19,18 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "disney_wait_times.db"
+METRICS_DB_PATH = Path(
+    os.environ.get("DISNEY_WAIT_TIMES_METRICS_DB_PATH")
+    or os.environ.get("APP_METRICS_DB_PATH")
+    or Path.cwd() / "data" / "app_metrics.db"
+)
 EASTERN = ZoneInfo("America/New_York")
 LOGGER = logging.getLogger("dwtmobile.collector")
 FETCH_TIMEOUT_SECONDS = 15
 FETCH_ATTEMPTS = 3
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+ENABLE_OSM_FACILITIES = False
+SOURCE_CONTROLS_KEY = "sourceControls"
 NON_RIDE_ATTRACTION_NAMES = {
     "maharajah jungle trek",
     "beauty and the beast sing-along",
@@ -80,6 +88,26 @@ PARKS: tuple[ParkConfig, ...] = (
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def get_disabled_sources() -> set[str]:
+    if not METRICS_DB_PATH.exists():
+        return set()
+    try:
+        connection = sqlite3.connect(METRICS_DB_PATH)
+        row = connection.execute(
+            "SELECT value FROM admin_settings WHERE key = ?",
+            (SOURCE_CONTROLS_KEY,),
+        ).fetchone()
+        connection.close()
+        if not row:
+            return set()
+        payload = json.loads(row[0])
+        disabled = payload.get("disabledSourceIds", [])
+        return {source for source in disabled if isinstance(source, str)}
+    except Exception as exc:
+        LOGGER.warning("Could not load source controls: %s", exc)
+        return set()
 
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
@@ -644,6 +672,7 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
     ride_count = 0
     meet_greet_count = 0
     optional_errors: list[str] = []
+    disabled_sources = get_disabled_sources()
 
     LOGGER.info("Polling %s", park.short_name)
 
@@ -666,29 +695,35 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
         )
         if not isinstance(themeparks_live.get("liveData"), list):
             raise ValueError("themeparks-live response did not include liveData")
-        queue_times_payload = fetch_optional_json_with_telemetry(
-            connection,
-            park_slug=park.slug,
-            source="queue-times",
-            url=f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json",
-            errors=optional_errors,
-        )
-        themeparks_schedule = fetch_optional_json_with_telemetry(
-            connection,
-            park_slug=park.slug,
-            source="themeparks-schedule",
-            url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule",
-            errors=optional_errors,
-        )
-        themeparks_children = fetch_optional_json_with_telemetry(
-            connection,
-            park_slug=park.slug,
-            source="themeparks-children",
-            url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/children",
-            errors=optional_errors,
-        )
+        queue_times_payload = None
+        if "queue-times" not in disabled_sources:
+            queue_times_payload = fetch_optional_json_with_telemetry(
+                connection,
+                park_slug=park.slug,
+                source="queue-times",
+                url=f"https://queue-times.com/parks/{park.queue_times_park_id}/queue_times.json",
+                errors=optional_errors,
+            )
+        themeparks_schedule = None
+        if "themeparks-schedule" not in disabled_sources:
+            themeparks_schedule = fetch_optional_json_with_telemetry(
+                connection,
+                park_slug=park.slug,
+                source="themeparks-schedule",
+                url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/schedule",
+                errors=optional_errors,
+            )
+        themeparks_children = None
+        if "themeparks-children" not in disabled_sources:
+            themeparks_children = fetch_optional_json_with_telemetry(
+                connection,
+                park_slug=park.slug,
+                source="themeparks-children",
+                url=f"https://api.themeparks.wiki/v1/entity/{park.themeparks_entity_id}/children",
+                errors=optional_errors,
+            )
         osm_facilities = None
-        if themeparks_children is not None:
+        if ENABLE_OSM_FACILITIES and "osm-overpass" not in disabled_sources and themeparks_children is not None:
             osm_facilities = fetch_osm_facilities(connection, park, themeparks_children)
             if osm_facilities is None:
                 optional_errors.append("osm-overpass: unavailable")
@@ -779,7 +814,7 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
         replace_showtimes(connection, park, captured_at, themeparks_live)
         if themeparks_children is not None:
             replace_restaurants(connection, park, captured_at, themeparks_children)
-            if osm_facilities is not None:
+            if ENABLE_OSM_FACILITIES and osm_facilities is not None:
                 replace_facilities(connection, park, captured_at, osm_facilities)
 
         last_error = "; ".join(optional_errors)[:500] if optional_errors else None
@@ -817,13 +852,14 @@ def process_park(connection: sqlite3.Connection, park: ParkConfig) -> bool:
         return False
 
 
-def run_once(connection: sqlite3.Connection) -> None:
+def run_once(connection: sqlite3.Connection, park_slug: str | None = None) -> None:
     started_at = utc_now()
     started = time.monotonic()
     success_count = 0
     failure_count = 0
     LOGGER.info("Starting poll cycle")
-    for park in PARKS:
+    parks = [park for park in PARKS if park_slug is None or park.slug == park_slug]
+    for park in parks:
         if process_park(connection, park):
             success_count += 1
         else:
@@ -851,6 +887,7 @@ def run_once(connection: sqlite3.Connection) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll Walt Disney World wait times into SQLite.")
     parser.add_argument("--once", action="store_true", help="Run one poll cycle and exit.")
+    parser.add_argument("--park", choices=[park.slug for park in PARKS], help="Only poll one park.")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -870,12 +907,12 @@ def main() -> int:
     ensure_schema(connection)
 
     if args.once:
-        run_once(connection)
+        run_once(connection, args.park)
         return 0
 
     while True:
         started = time.monotonic()
-        run_once(connection)
+        run_once(connection, args.park)
         now_eastern = datetime.now(EASTERN)
         target_sleep = sleep_seconds_for_current_window(now_eastern)
         elapsed = max(0, int(time.monotonic() - started))

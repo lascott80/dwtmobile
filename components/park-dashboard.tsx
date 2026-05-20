@@ -240,6 +240,18 @@ function normalizeParkData(park: Partial<ParkDetailResponse>): ParkDetailRespons
   };
 }
 
+function normalizeParkMeta(meta: ParkMetaResponse): ParkMetaResponse {
+  return {
+    ...meta,
+    defaultHiddenRideIds: Array.isArray(meta.defaultHiddenRideIds) ? meta.defaultHiddenRideIds : [],
+    featureFlags: {
+      recommendations: meta.featureFlags?.recommendations !== false,
+      map: meta.featureFlags?.map !== false,
+      weather: meta.featureFlags?.weather !== false
+    }
+  };
+}
+
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = API_FETCH_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -703,9 +715,11 @@ export function ParkDashboard() {
     fetchJsonWithTimeout<unknown>("/api/meta")
       .then((data) => {
         if (!isParkMetaResponse(data)) throw new Error("Invalid park meta response");
-        setMeta(data);
-        if (!data.parks.find((park) => park.slug === activePark) && data.parks[0]) {
-          setActivePark(data.parks[0].slug);
+        const normalizedMeta = normalizeParkMeta(data);
+        setMeta(normalizedMeta);
+        seedDefaultHiddenRideIds(normalizedMeta.defaultHiddenRideIds);
+        if (!normalizedMeta.parks.find((park) => park.slug === activePark) && normalizedMeta.parks[0]) {
+          setActivePark(normalizedMeta.parks[0].slug);
         }
       })
       .finally(() => setLoading(false));
@@ -727,16 +741,18 @@ export function ParkDashboard() {
           throw new Error("Invalid park API response");
         }
         const normalizedPark = normalizeParkData(park);
+        const normalizedMeta = normalizeParkMeta(parkMeta);
         notifyFavoriteChanges(previousRidesRef.current, normalizedPark);
         setParkData(normalizedPark);
-        setMeta(parkMeta);
+        setMeta(normalizedMeta);
+        seedDefaultHiddenRideIds(normalizedMeta.defaultHiddenRideIds);
         setOfflineMode(false);
         try {
           window.localStorage.setItem(
             `${PARK_CACHE_KEY}:${slug}`,
             JSON.stringify({
               park: normalizedPark,
-              meta: parkMeta,
+              meta: normalizedMeta,
               cachedAt: new Date().toISOString()
             })
           );
@@ -757,8 +773,10 @@ export function ParkDashboard() {
             meta: ParkMetaResponse;
           };
           if (!isParkMetaResponse(cached.meta)) throw new Error("Invalid cached meta");
+          const normalizedMeta = normalizeParkMeta(cached.meta);
           setParkData(normalizeParkData(cached.park));
-          setMeta(cached.meta);
+          setMeta(normalizedMeta);
+          seedDefaultHiddenRideIds(normalizedMeta.defaultHiddenRideIds);
           setOfflineMode(true);
         } catch {
           // Ignore corrupted cache data.
@@ -778,10 +796,20 @@ export function ParkDashboard() {
   }, [activePark]);
 
   useEffect(() => {
+    if (meta?.featureFlags.weather === false) {
+      setWeather(null);
+      return;
+    }
     void fetchJsonWithTimeout<WeatherResponse>(`/api/weather?parkSlug=${activePark}`, 6_000)
       .then((data: WeatherResponse) => setWeather(data))
       .catch(() => setWeather(null));
-  }, [activePark]);
+  }, [activePark, meta?.featureFlags.weather]);
+
+  useEffect(() => {
+    if (dashboardMode === "map" && meta?.featureFlags.map === false) {
+      setDashboardMode("today");
+    }
+  }, [dashboardMode, meta?.featureFlags.map]);
 
   useEffect(() => {
     if (!parkData?.status.hasData) return;
@@ -915,6 +943,12 @@ export function ParkDashboard() {
       body: JSON.stringify({ visitorId, eventName, detail }),
       keepalive: true
     });
+  }
+
+  function seedDefaultHiddenRideIds(defaultHiddenRideIds: string[]) {
+    if (defaultHiddenRideIds.length === 0 || window.localStorage.getItem(NO_GO_KEY) !== null) return;
+    setNoGoRideIds(defaultHiddenRideIds);
+    window.localStorage.setItem(NO_GO_KEY, JSON.stringify(defaultHiddenRideIds));
   }
 
   function currentPreferencePayload(): PreferenceSyncPayload {
@@ -1432,6 +1466,8 @@ export function ParkDashboard() {
   const doneRides = useMemo(() => allRides.filter((ride) => dayState[ride.id] === "done"), [allRides, dayState]);
   const skippedRides = useMemo(() => allRides.filter((ride) => dayState[ride.id] === "skip"), [allRides, dayState]);
   const hiddenRides = useMemo(() => allRides.filter((ride) => noGoRideIds.includes(ride.id)), [allRides, noGoRideIds]);
+  const recommendationsEnabled = meta?.featureFlags.recommendations !== false;
+  const mapEnabled = meta?.featureFlags.map !== false;
   const activeParkAlerts = useMemo(
     () => allRides.filter((ride) => alertThresholds[ride.id]).length,
     [alertThresholds, allRides]
@@ -1450,6 +1486,7 @@ export function ParkDashboard() {
     };
   }, [doneRides, mustDoRides, snipes]);
   const parkCopilot = useMemo(() => {
+    if (!recommendationsEnabled) return null;
     const rainLikely = nextHourRainChance(weather) >= 40;
     const candidates = allRides
       .filter(
@@ -1515,7 +1552,7 @@ export function ParkDashboard() {
       rainLikely,
       why
     };
-  }, [allRides, dayState, favorites, noGoRideIds, openRides.length, preferenceProfile, tripMemory, weather]);
+  }, [allRides, dayState, favorites, noGoRideIds, openRides.length, preferenceProfile, recommendationsEnabled, tripMemory, weather]);
   const decisionBrief = useMemo(() => {
     if (!parkData) return [];
     return [
@@ -1597,7 +1634,7 @@ export function ParkDashboard() {
   }, [favoriteRides, parkData, planItems, recommendableRideIds]);
   const predictionWindows = useMemo(
     () =>
-      allRides
+      recommendationsEnabled ? allRides
         .filter((ride) => recommendableRideIds.has(ride.id) && ride.isOpen && ride.waitTime !== null)
         .map((ride) => ({ ride, prediction: ridePredictions.get(ride.id) ?? predictionForRide(ride) }))
         .filter(({ prediction }) => prediction.tone === "now" || prediction.tone === "later")
@@ -1606,8 +1643,8 @@ export function ParkDashboard() {
           const bScore = b.prediction.tone === "now" ? 0 : 1;
           return aScore - bScore || (a.ride.waitTime ?? 999) - (b.ride.waitTime ?? 999);
         })
-        .slice(0, 4),
-    [allRides, recommendableRideIds, ridePredictions]
+        .slice(0, 4) : [],
+    [allRides, recommendableRideIds, recommendationsEnabled, ridePredictions]
   );
   const upcomingPlanItems = useMemo(
     () =>
@@ -1637,7 +1674,7 @@ export function ParkDashboard() {
     return warnings.slice(0, 2);
   }, [upcomingPlanItems]);
   const landFlowRecommendations = useMemo(() => {
-    if (!parkData) return [];
+    if (!parkData || !recommendationsEnabled) return [];
     return parkData.lands
       .map((land) => {
         const rides = land.rides
@@ -1669,7 +1706,7 @@ export function ParkDashboard() {
       .filter((land) => land.rides.length >= 2)
       .sort((a, b) => b.score - a.score)
       .slice(0, 2);
-  }, [dayState, favorites, noGoRideIds, parkData, preferenceProfile, tripMemory]);
+  }, [dayState, favorites, noGoRideIds, parkData, preferenceProfile, recommendationsEnabled, tripMemory]);
   const bestCharacterMeet = useMemo(() => {
     const now = Date.now();
     return (parkData?.meetGreets ?? [])
@@ -1909,10 +1946,20 @@ export function ParkDashboard() {
                   <i aria-hidden="true" />
                 </div>
               </button>
-            ) : (
+            ) : recommendationsEnabled ? (
               <div className="command-primary static">
                 <span>Next move</span>
                 <strong>Building recommendations</strong>
+                <small>{parkData.crowdPulse.detail}</small>
+                <div className="command-reason">
+                  <em>{openRides.length} open rides in view</em>
+                  <i aria-hidden="true" />
+                </div>
+              </div>
+            ) : (
+              <div className="command-primary static">
+                <span>Park pulse</span>
+                <strong>{parkData.crowdPulse.headline}</strong>
                 <small>{parkData.crowdPulse.detail}</small>
                 <div className="command-reason">
                   <em>{openRides.length} open rides in view</em>
@@ -1954,7 +2001,7 @@ export function ParkDashboard() {
           </section>}
 
           <nav className="mode-tabs" aria-label="Dashboard sections">
-            {(["today", "map", "my-day", "rides"] as const).map((mode) => (
+            {(["today", ...(mapEnabled ? ["map" as const] : []), "my-day", "rides"] as const).map((mode) => (
               <button
                 className={dashboardMode === mode ? "active" : ""}
                 key={mode}

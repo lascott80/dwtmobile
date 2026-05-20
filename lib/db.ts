@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { getDefaultHiddenRideIds, getFeatureFlags, getGlobalHiddenRideIds } from "@/lib/admin-settings";
 import { DB_PATH, PARKS } from "@/lib/config";
 import type {
   CrowdPulse,
@@ -153,6 +154,8 @@ export function getParkMeta() {
   const database = connect();
   return {
     generatedAt: new Date().toISOString(),
+    defaultHiddenRideIds: getDefaultHiddenRideIds(),
+    featureFlags: getFeatureFlags(),
     parks: PARKS.map(({ slug, name, shortName }) => ({
       slug,
       name,
@@ -200,6 +203,7 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
     };
   }
   try {
+    const globalHiddenRideIds = getGlobalHiddenRideIds();
     const refresh = database
       .prepare(
         `
@@ -306,10 +310,11 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
           WHERE a.park_slug = ?
             AND a.category = 'ride'
             AND a.name NOT IN (${HIDDEN_RIDE_NAMES.map(() => "?").join(", ")})
+            AND a.id NOT IN (${globalHiddenRideIds.length ? globalHiddenRideIds.map(() => "?").join(", ") : "''"})
           ORDER BY areaSort, a.name
         `
       )
-      .all(park.slug, park.slug, park.slug, park.slug, ...HIDDEN_RIDE_NAMES) as Array<{
+      .all(park.slug, park.slug, park.slug, park.slug, ...HIDDEN_RIDE_NAMES, ...globalHiddenRideIds) as Array<{
         id: string;
         name: string;
         areaName: string;

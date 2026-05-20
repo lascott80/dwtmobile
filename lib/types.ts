@@ -8,6 +8,12 @@ export type ParkSummary = {
 export type ParkMetaResponse = {
   generatedAt: string;
   parks: ParkSummary[];
+  defaultHiddenRideIds: string[];
+  featureFlags: {
+    recommendations: boolean;
+    map: boolean;
+    weather: boolean;
+  };
 };
 
 export type ParkHoursEntry = {

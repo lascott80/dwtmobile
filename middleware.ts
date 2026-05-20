@@ -43,5 +43,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/stats/:path*"]
+  matcher: ["/stats/:path*", "/admin/:path*"]
 };

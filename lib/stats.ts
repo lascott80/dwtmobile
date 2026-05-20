@@ -15,8 +15,7 @@ const SOURCE_IMPACT: Record<string, string> = {
   "queue-times": "Ride waits and land grouping",
   "themeparks-children": "Attractions, dining, and locations",
   "themeparks-live": "Live statuses, shows, and meet-and-greets",
-  "themeparks-schedule": "Park hours and operating schedules",
-  "osm-overpass": "Restrooms, water, and first aid"
+  "themeparks-schedule": "Park hours and operating schedules"
 };
 
 let metricsDb: DatabaseSync | null = null;
@@ -457,6 +456,7 @@ export function getStorageStats() {
               duration_ms AS durationMs,
               ROW_NUMBER() OVER (PARTITION BY source ORDER BY checked_at DESC) AS rowNum
             FROM source_checks
+            WHERE source <> 'osm-overpass'
           )
           SELECT source, success, checkedAt, error, durationMs
           FROM ranked
@@ -658,6 +658,7 @@ export function getStorageStats() {
             COUNT(*) AS checks
           FROM source_checks
           WHERE datetime(checked_at) >= datetime('now', '-24 hours')
+            AND source <> 'osm-overpass'
           GROUP BY source
           ORDER BY source
         `
@@ -682,6 +683,7 @@ export function getStorageStats() {
             ROUND(100.0 * SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) / COUNT(*)) AS failureRate
           FROM source_checks
           WHERE datetime(checked_at) >= datetime('now', '-24 hours')
+            AND source <> 'osm-overpass'
           GROUP BY source
           ORDER BY source
         `
@@ -708,9 +710,6 @@ export function getStorageStats() {
         .get() as { lastUpdatedAt: string | null; rows: number },
       restaurants: database
         .prepare("SELECT MAX(updated_at) AS lastUpdatedAt, COUNT(*) AS rows FROM restaurants")
-        .get() as { lastUpdatedAt: string | null; rows: number },
-      facilities: database
-        .prepare("SELECT MAX(updated_at) AS lastUpdatedAt, COUNT(*) AS rows FROM facilities")
         .get() as { lastUpdatedAt: string | null; rows: number }
     };
 
@@ -811,6 +810,7 @@ export function getStorageStats() {
             COUNT(*) AS occurrences
           FROM source_checks
           WHERE success = 0
+            AND source <> 'osm-overpass'
             AND datetime(checked_at) >= datetime('now', '-7 days')
           GROUP BY source, error
           ORDER BY lastSeenAt DESC

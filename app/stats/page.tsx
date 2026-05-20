@@ -71,9 +71,6 @@ export default function StatsPage() {
     ? [
         storage.health.staleParks > 0 ? `${storage.health.staleParks} park(s) stale` : null,
         storage.health.parksWithErrors > 0 ? `${storage.health.parksWithErrors} park(s) with collector errors` : null,
-        storage.sourceImpact.some((source) => source.source === "osm-overpass" && source.failuresLast24h > 0)
-          ? "OSM failing; facilities may be stale"
-          : null,
         storage.coverageQuality.ridesWithoutRecentData > 0
           ? `${storage.coverageQuality.ridesWithoutRecentData} rides without recent data`
           : null,
@@ -148,10 +145,6 @@ export default function StatsPage() {
           <article className={healthTone(Boolean(storage && storage.dataTypeFreshness.showtimes.rows > 0))}>
             <strong>Shows and meetups</strong>
             <span>{storage?.dataTypeFreshness.showtimes.rows ? `${formatAge(storage.dataTypeFreshness.showtimes.lastUpdatedAt)}` : "No showtime rows"}</span>
-          </article>
-          <article className={healthTone(Boolean(storage && storage.dataTypeFreshness.facilities.rows > 0))}>
-            <strong>Facilities</strong>
-            <span>{storage?.dataTypeFreshness.facilities.rows ? `${formatNumber(storage.dataTypeFreshness.facilities.rows)} rows, ${formatAge(storage.dataTypeFreshness.facilities.lastUpdatedAt)}` : "Missing OSM facilities"}</span>
           </article>
           <article className={healthTone(Boolean(storage && storage.health.parksWithErrors === 0))}>
             <strong>Collector</strong>
@@ -261,18 +254,6 @@ export default function StatsPage() {
                 <strong>{kind}</strong>
                 <span>{formatNumber(freshness.rows)} rows</span>
                 <em className={freshness.lastUpdatedAt ? "healthy" : "warning"}>{formatAge(freshness.lastUpdatedAt)}</em>
-              </div>
-            ))}
-          </div>
-        </article>
-        <article className="noc-panel">
-          <div className="noc-panel-head"><h2>Facilities / OSM</h2><span>Restrooms, water, first aid</span></div>
-          <div className="source-list">
-            {storage?.facilitiesByPark.map((park) => (
-              <div key={park.slug}>
-                <strong>{park.shortName}</strong>
-                <span>{park.restrooms} restroom · {park.water} water · {park.firstAid} first aid</span>
-                <em className={park.total > 0 ? "healthy" : "warning"}>{park.total} total</em>
               </div>
             ))}
           </div>
