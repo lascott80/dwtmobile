@@ -16,7 +16,18 @@ import {
   Ticket,
   UsersRound
 } from "lucide-react";
-import type { LandGroup, ParkDetailResponse, ParkMetaResponse, RideHistoryPoint, RideItem, ShowTimeItem } from "@/lib/types";
+import type {
+  CrowdPulse,
+  LandGroup,
+  ParkDetailResponse,
+  ParkMetaResponse,
+  RideHistoryBaselinePoint,
+  RideHistoryOperatingWindow,
+  RideHistoryPoint,
+  RideHistoryResponse,
+  RideItem,
+  ShowTimeItem
+} from "@/lib/types";
 import { VISITOR_KEY } from "@/components/visit-tracker";
 
 const FAVORITES_KEY = "dwtmobile:favorites";
@@ -48,6 +59,7 @@ type WeatherResponse = {
   hourly?: { time?: string[]; precipitation_probability?: number[]; precipitation?: number[] };
 };
 type RidePrediction = ReturnType<typeof predictionForRide>;
+type SignalTag = { label: string; tone: "good" | "watch" | "alert" | "info" };
 type SmartMove =
   | { key: string; label: string; title: string; detail: string; ride: RideItem; tone: "ride" | "land" }
   | { key: string; label: string; title: string; detail: string; show: ShowTimeItem; tone: "show" | "character" };
@@ -205,6 +217,96 @@ function trendLabel(trendMinutes: number | null) {
   return `${prefix}${trendMinutes} vs 1 hr`;
 }
 
+function forecastLabel(ride: RideItem) {
+  if (!ride.isOpen || ride.waitTime === null || ride.forecastWaitTime === null) return null;
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes >= 10) {
+    return `Likely climbs toward ${ride.forecastWaitTime} min`;
+  }
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes <= -10) {
+    return `Likely eases toward ${ride.forecastWaitTime} min`;
+  }
+  const range =
+    ride.forecastLowWaitTime !== null &&
+    ride.forecastHighWaitTime !== null &&
+    ride.forecastHighWaitTime - ride.forecastLowWaitTime >= 10
+      ? `${ride.forecastLowWaitTime}-${ride.forecastHighWaitTime} min`
+      : `${ride.forecastWaitTime} min`;
+  return `Likely holds near ${range}`;
+}
+
+function forecastTone(ride: RideItem) {
+  if (ride.forecastTrendMinutes === null) return "steady";
+  if (ride.forecastTrendMinutes >= 10) return "rising";
+  if (ride.forecastTrendMinutes <= -10) return "falling";
+  return "steady";
+}
+
+function dropLabel(ride: RideItem) {
+  if (!ride.isOpen || ride.waitTime === null) return null;
+  if (ride.dropMinutes !== null) return `Dropped ${ride.dropMinutes} min in the last hour`;
+  if (ride.waitTime !== null && ride.normalWaitTime !== null && ride.normalWaitTime - ride.waitTime >= 15) {
+    return `${ride.normalWaitTime - ride.waitTime} min below baseline`;
+  }
+  return null;
+}
+
+function signalTagsForRide(ride: RideItem, limit = 4): SignalTag[] {
+  const tags: SignalTag[] = [];
+  if (ride.waitTime !== null && ride.isOpen && ride.waitTime <= 20) {
+    tags.push({ label: "Short wait", tone: "good" });
+  }
+  if (ride.dropMinutes !== null) {
+    tags.push({ label: `Dropped ${ride.dropMinutes}m`, tone: "alert" });
+  }
+  if (ride.waitTime !== null && ride.normalWaitTime !== null && ride.normalWaitTime - ride.waitTime >= 10) {
+    tags.push({ label: `${ride.normalWaitTime - ride.waitTime}m below baseline`, tone: "good" });
+  }
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes >= 10) {
+    tags.push({ label: "Forecast rising", tone: "watch" });
+  }
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes <= -10) {
+    tags.push({ label: "May ease soon", tone: "info" });
+  }
+  return tags.slice(0, limit);
+}
+
+function SignalTags({ tags }: { tags: SignalTag[] }) {
+  if (tags.length === 0) return null;
+  return (
+    <div className="signal-tags">
+      {tags.map((tag) => (
+        <span className={`signal-tag signal-${tag.tone}`} key={`${tag.tone}-${tag.label}`}>{tag.label}</span>
+      ))}
+    </div>
+  );
+}
+
+function momentumScoreLabel(score: number) {
+  return `${score}/10`;
+}
+
+function momentumDetailLabel(momentum: CrowdPulse["momentum"]) {
+  if (momentum.direction === "learning") return "Learning";
+  return `${momentum.improvingCount} easing, ${momentum.worseningCount} rising`;
+}
+
+function CrowdLevelMeter({ score }: { score: number }) {
+  const normalized = Math.max(1, Math.min(10, score));
+  return (
+    <div className={`crowd-meter momentum-score-${normalized}`} aria-label={`Crowd Level ${normalized} out of 10`}>
+      <div>
+        <span>Crowd Level</span>
+        <strong>{normalized}/10</strong>
+      </div>
+      <ol aria-hidden="true">
+        {Array.from({ length: 10 }, (_, index) => (
+          <li className={index < normalized ? "active" : ""} key={index} />
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function fallbackCrowdPulse() {
   return {
     level: "building" as const,
@@ -212,11 +314,21 @@ function fallbackCrowdPulse() {
     detail: "Not enough live ride data yet to read the park pulse.",
     averageWaitTime: null,
     deltaFromNormal: null,
-    sampleSize: 0
+    sampleSize: 0,
+    momentum: {
+      direction: "learning" as const,
+      score: 5,
+      headline: "Momentum building",
+      detail: "Need a few more trend samples to read park movement.",
+      improvingCount: 0,
+      worseningCount: 0,
+      dropCount: 0
+    }
   };
 }
 
 function normalizeParkData(park: Partial<ParkDetailResponse>): ParkDetailResponse {
+  const crowdPulse = park.crowdPulse ?? fallbackCrowdPulse();
   return {
     park: park.park ?? {
       slug: "unknown",
@@ -233,10 +345,28 @@ function normalizeParkData(park: Partial<ParkDetailResponse>): ParkDetailRespons
     hours: park.hours ?? [],
     featuredShows: park.featuredShows ?? [],
     meetGreets: park.meetGreets ?? [],
-    crowdPulse: park.crowdPulse ?? fallbackCrowdPulse(),
+    crowdPulse: {
+      ...crowdPulse,
+      momentum: {
+        ...fallbackCrowdPulse().momentum,
+        ...(crowdPulse.momentum ?? {}),
+        score: crowdPulse.momentum?.score ?? fallbackCrowdPulse().momentum.score
+      }
+    },
     restaurants: park.restaurants ?? [],
     facilities: park.facilities ?? [],
-    lands: park.lands ?? []
+    lands: (park.lands ?? []).map((land) => ({
+      ...land,
+      rides: land.rides.map((ride) => ({
+        ...ride,
+        forecastWaitTime: ride.forecastWaitTime ?? null,
+        forecastLowWaitTime: ride.forecastLowWaitTime ?? null,
+        forecastHighWaitTime: ride.forecastHighWaitTime ?? null,
+        forecastSampleSize: ride.forecastSampleSize ?? 0,
+        forecastTrendMinutes: ride.forecastTrendMinutes ?? null,
+        dropMinutes: ride.dropMinutes ?? null
+      }))
+    }))
   };
 }
 
@@ -318,11 +448,27 @@ function predictionForRide(ride: RideItem, points: RideHistoryPoint[] = []) {
   const normalDelta = ride.normalWaitTime === null ? 0 : ride.waitTime - ride.normalWaitTime;
   const trend = ride.trendMinutes ?? 0;
 
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes >= 10 && ride.waitTime <= 35) {
+    return {
+      headline: "Go before it climbs",
+      detail: `Next 2 hours look closer to ${ride.forecastWaitTime} min.`,
+      tone: "now"
+    };
+  }
+
   if (normalDelta <= -10 || trend <= -10 || (recentLow !== null && ride.waitTime <= recentLow + 5)) {
     return {
       headline: "Go now",
       detail: ride.normalWaitTime === null ? `${ride.waitTime} min and trending favorably.` : `${Math.abs(normalDelta)} min below its usual wait.`,
       tone: "now"
+    };
+  }
+
+  if (ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes <= -10) {
+    return {
+      headline: "Wait it out",
+      detail: `History suggests it may ease toward ${ride.forecastWaitTime} min in the next 2 hours.`,
+      tone: "later"
     };
   }
 
@@ -533,6 +679,8 @@ export function ParkDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRide, setSelectedRide] = useState<RideItem | null>(null);
   const [rideHistory, setRideHistory] = useState<RideHistoryPoint[]>([]);
+  const [rideHistoryBaseline, setRideHistoryBaseline] = useState<RideHistoryBaselinePoint[]>([]);
+  const [rideHistoryWindow, setRideHistoryWindow] = useState<RideHistoryOperatingWindow | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [chromeElevated, setChromeElevated] = useState(false);
@@ -917,10 +1065,20 @@ export function ParkDashboard() {
     }
     setSelectedRide(ride);
     setRideHistory([]);
+    setRideHistoryBaseline([]);
+    setRideHistoryWindow(null);
     void fetch(`/api/rides/${ride.id}/history`)
       .then((response) => response.json())
-      .then((data: { points?: RideHistoryPoint[] }) => setRideHistory(data.points ?? []))
-      .catch(() => setRideHistory([]));
+      .then((data: Partial<RideHistoryResponse>) => {
+        setRideHistory(data.points ?? []);
+        setRideHistoryBaseline(data.baselinePoints ?? []);
+        setRideHistoryWindow(data.operatingWindow ?? null);
+      })
+      .catch(() => {
+        setRideHistory([]);
+        setRideHistoryBaseline([]);
+        setRideHistoryWindow(null);
+      });
     trackEvent("ride_sheet_open", ride.id);
   }
 
@@ -932,6 +1090,8 @@ export function ParkDashboard() {
     rideSheetHistoryRef.current = false;
     setSelectedRide(null);
     setRideHistory([]);
+    setRideHistoryBaseline([]);
+    setRideHistoryWindow(null);
   }
 
   function trackEvent(eventName: string, detail: string) {
@@ -1317,6 +1477,18 @@ export function ParkDashboard() {
         } else if (
           pushAlertsEnabledRef.current &&
           current.waitTime !== null &&
+          current.dropMinutes !== null &&
+          current.dropMinutes >= 15 &&
+          previous.waitTime !== current.waitTime
+        ) {
+          void sendLocalPush(
+            `${current.name} just dropped ${current.dropMinutes} min`,
+            `${park.park.shortName}: ${current.waitTime} min now.`
+          );
+          addSnipe(current, park);
+        } else if (
+          pushAlertsEnabledRef.current &&
+          current.waitTime !== null &&
           current.normalWaitTime !== null &&
           current.normalWaitTime - current.waitTime >= 10 &&
           previous.waitTime !== current.waitTime
@@ -1453,6 +1625,36 @@ export function ParkDashboard() {
         .slice(0, 3),
     [allRides, noGoRideIds]
   );
+  const dropAlerts = useMemo(
+    () =>
+      allRides
+        .filter((ride) => isRecommendableRide(ride, noGoRideIds) && ride.isOpen && ride.waitTime !== null && dropLabel(ride))
+        .sort((a, b) => {
+          const aDrop = a.dropMinutes ?? Math.max(0, (a.normalWaitTime ?? 0) - (a.waitTime ?? 0));
+          const bDrop = b.dropMinutes ?? Math.max(0, (b.normalWaitTime ?? 0) - (b.waitTime ?? 0));
+          return bDrop - aDrop || (a.waitTime ?? 999) - (b.waitTime ?? 999);
+        })
+        .slice(0, 3),
+    [allRides, noGoRideIds]
+  );
+  const forecastOpportunities = useMemo(
+    () =>
+      allRides
+        .filter(
+          (ride) =>
+            isRecommendableRide(ride, noGoRideIds) &&
+            ride.isOpen &&
+            ride.waitTime !== null &&
+            ride.forecastWaitTime !== null
+        )
+        .sort((a, b) => {
+          const aUrgency = a.forecastTrendMinutes ?? 0;
+          const bUrgency = b.forecastTrendMinutes ?? 0;
+          return bUrgency - aUrgency || (a.waitTime ?? 999) - (b.waitTime ?? 999);
+        })
+        .slice(0, 3),
+    [allRides, noGoRideIds]
+  );
   const nextFeaturedShow = useMemo(() => {
     if (!parkData) return null;
     const now = Date.now();
@@ -1504,6 +1706,8 @@ export function ParkDashboard() {
         const favoriteBonus = favorites.includes(ride.id) ? 10 : 0;
         const indoorBonus = rainLikely && isLikelyIndoor(ride.name) ? 14 : 0;
         const shortWaitBonus = (ride.waitTime ?? Number.MAX_SAFE_INTEGER) <= 20 ? 8 : 0;
+        const forecastBonus = ride.forecastTrendMinutes !== null && ride.forecastTrendMinutes >= 10 ? 8 : 0;
+        const dropBonus = ride.dropMinutes !== null ? Math.min(12, ride.dropMinutes / 2) : 0;
         const profileBonus = profileScoreAdjustment(ride, preferenceProfile);
         const memoryPenalty =
           (tripMemory.skippedRideIds[ride.id] ?? 0) * 8 +
@@ -1512,7 +1716,16 @@ export function ParkDashboard() {
           ride,
           advantage,
           rainLikely,
-          score: advantage + mustDoBonus + favoriteBonus + indoorBonus + shortWaitBonus + profileBonus - memoryPenalty
+          score:
+            advantage +
+            mustDoBonus +
+            favoriteBonus +
+            indoorBonus +
+            shortWaitBonus +
+            forecastBonus +
+            dropBonus +
+            profileBonus -
+            memoryPenalty
         };
       })
       .sort((a, b) => b.score - a.score || (a.ride.waitTime ?? 999) - (b.ride.waitTime ?? 999));
@@ -1520,6 +1733,8 @@ export function ParkDashboard() {
     if (!top) return null;
     const reasons = [
       top.advantage >= 10 ? `${top.advantage} min below normal` : null,
+      top.ride.dropMinutes !== null ? `just dropped ${top.ride.dropMinutes} min` : null,
+      top.ride.forecastTrendMinutes !== null && top.ride.forecastTrendMinutes >= 10 ? "forecast rising" : null,
       dayState[top.ride.id] === "must-do" ? "on your must-do list" : null,
       rainLikely && isLikelyIndoor(top.ride.name) ? "rain-friendly" : null,
       top.ride.waitTime !== null && top.ride.waitTime <= 20 ? "short wait" : null
@@ -1530,6 +1745,12 @@ export function ParkDashboard() {
         : null,
       top.ride.waitTime !== null && top.ride.waitTime <= 20
         ? { label: "Easy fit", detail: `${top.ride.waitTime} min is short enough to act on without much planning.` }
+        : null,
+      top.ride.dropMinutes !== null
+        ? { label: "Fresh drop", detail: `It fell ${top.ride.dropMinutes} min compared with about an hour ago.` }
+        : null,
+      top.ride.forecastTrendMinutes !== null && top.ride.forecastTrendMinutes >= 10
+        ? { label: "Forecast rising", detail: `Prior days suggest the next 2 hours average around ${top.ride.forecastWaitTime} min.` }
         : null,
       favorites.includes(top.ride.id)
         ? { label: "Saved by you", detail: "This ride is in your favorites, so it gets extra priority." }
@@ -1919,7 +2140,11 @@ export function ParkDashboard() {
                 <p>Today in {parkData.park.shortName}</p>
                 <strong>{parkData.crowdPulse.headline}</strong>
               </div>
+              <CrowdLevelMeter score={parkData.crowdPulse.momentum.score} />
+            </div>
+            <div className="park-status-line">
               <span>{medianWait !== null ? `${medianWait}m median` : parkData.crowdPulse.averageWaitTime !== null ? `${parkData.crowdPulse.averageWaitTime}m avg` : "Learning"}</span>
+              <span>{momentumDetailLabel(parkData.crowdPulse.momentum)}</span>
             </div>
             <div className="decision-brief" aria-label="Current park confidence signals">
               {decisionBrief.map((item) => (
@@ -1941,6 +2166,7 @@ export function ParkDashboard() {
                 <span className="with-icon icon-next"><Navigation size={15} strokeWidth={2.5} />{parkCopilot.rainLikely ? "Weather-aware next move" : "Next move"}</span>
                 <strong>{parkCopilot.headline}</strong>
                 <small>{parkCopilot.detail}</small>
+                <SignalTags tags={signalTagsForRide(parkCopilot.ride, 3)} />
                 <div className="command-reason">
                   <em>{shortWaitRides.length} rides at 20 min or less</em>
                   <i aria-hidden="true" />
@@ -1998,6 +2224,24 @@ export function ParkDashboard() {
                 )}
               </div>
             )}
+            {(dropAlerts[0] || forecastOpportunities[0]) && (
+              <div className="command-signal-strip" aria-label="Priority park signals">
+                {dropAlerts[0] && (
+                  <button onClick={() => openRideDetails(dropAlerts[0])} type="button">
+                    <span>Best drop</span>
+                    <strong>{dropAlerts[0].name}</strong>
+                    <small>{dropLabel(dropAlerts[0])}</small>
+                  </button>
+                )}
+                {forecastOpportunities[0] && (
+                  <button onClick={() => openRideDetails(forecastOpportunities[0])} type="button">
+                    <span>Forecast</span>
+                    <strong>{forecastOpportunities[0].name}</strong>
+                    <small>{forecastLabel(forecastOpportunities[0])}</small>
+                  </button>
+                )}
+              </div>
+            )}
           </section>}
 
           <nav className="mode-tabs" aria-label="Dashboard sections">
@@ -2037,6 +2281,7 @@ export function ParkDashboard() {
                           </span>
                           <strong>{move.title}</strong>
                           <small>{move.detail}</small>
+                          <SignalTags tags={signalTagsForRide(move.ride, 2)} />
                         </button>
                       ) : (
                         <article className={`smart-move smart-${move.tone}`} key={move.key}>
@@ -2058,30 +2303,60 @@ export function ParkDashboard() {
                     <p>Quick read</p>
                     <strong>Best signals right now</strong>
                   </div>
-                  <div className="command-grid">
-                    <article>
-                      <small>Best value</small>
-                      <strong>{bestFavorite?.name ?? bestBets[0]?.ride.name ?? shortWaitRides[0]?.name ?? "Building"}</strong>
-                      <span>
-                        {bestFavorite
-                          ? minutesLabel(bestFavorite.waitTime, bestFavorite.isOpen) ?? statusLabel(bestFavorite)
-                          : bestBets[0]
-                            ? `${bestBets[0].advantage} min below normal`
-                            : shortWaitRides[0]
-                              ? minutesLabel(shortWaitRides[0].waitTime, shortWaitRides[0].isOpen)
-                              : "More history needed"}
-                      </span>
-                    </article>
-                    <article>
-                      <small>Short waits</small>
-                      <strong>{shortWaitRides.length}</strong>
-                      <span>20 min or less</span>
-                    </article>
-                    <article>
-                      <small>Next show</small>
-                      <strong>{nextFeaturedShow?.name ?? "No show ahead"}</strong>
-                      <span>{nextFeaturedShow ? formatTime(nextFeaturedShow.startTime) : "—"}</span>
-                    </article>
+                  <div className="quick-groups">
+                    <section className="quick-group quick-now">
+                      <p>Now</p>
+                      <div className="command-grid">
+                        <article className="quick-feature">
+                          <small>Best value</small>
+                          <strong>{bestFavorite?.name ?? bestBets[0]?.ride.name ?? shortWaitRides[0]?.name ?? "Building"}</strong>
+                          <span>
+                            {bestFavorite
+                              ? minutesLabel(bestFavorite.waitTime, bestFavorite.isOpen) ?? statusLabel(bestFavorite)
+                              : bestBets[0]
+                                ? `${bestBets[0].advantage} min below normal`
+                                : shortWaitRides[0]
+                                  ? minutesLabel(shortWaitRides[0].waitTime, shortWaitRides[0].isOpen)
+                                  : "More history needed"}
+                          </span>
+                        </article>
+                        <article>
+                          <small>Drop detector</small>
+                          <strong>{dropAlerts[0]?.name ?? "Watching"}</strong>
+                          <span>{dropAlerts[0] ? dropLabel(dropAlerts[0]) : "No major drops yet"}</span>
+                        </article>
+                      </div>
+                    </section>
+                    <section className="quick-group quick-trend">
+                      <p>Trend</p>
+                      <div className="command-grid">
+                        <article>
+                          <small>Crowd Level</small>
+                          <strong>{momentumScoreLabel(parkData.crowdPulse.momentum.score)}</strong>
+                          <span>{momentumDetailLabel(parkData.crowdPulse.momentum)}</span>
+                        </article>
+                        <article>
+                          <small>2 hr forecast</small>
+                          <strong>{forecastOpportunities[0]?.name ?? "Learning"}</strong>
+                          <span>{forecastOpportunities[0] ? forecastLabel(forecastOpportunities[0]) : "More history needed"}</span>
+                        </article>
+                      </div>
+                    </section>
+                    <section className="quick-group quick-plan">
+                      <p>Plan</p>
+                      <div className="command-grid">
+                        <article>
+                          <small>Short waits</small>
+                          <strong>{shortWaitRides.length}</strong>
+                          <span>20 min or less</span>
+                        </article>
+                        <article>
+                          <small>Next show</small>
+                          <strong>{nextFeaturedShow?.name ?? "No show ahead"}</strong>
+                          <span>{nextFeaturedShow ? formatTime(nextFeaturedShow.startTime) : "—"}</span>
+                        </article>
+                      </div>
+                    </section>
                   </div>
                 </section>
               )}
@@ -2096,6 +2371,20 @@ export function ParkDashboard() {
                       <strong>{snipe.name}</strong>
                       <span>{snipe.message}</span>
                     </article>
+                  ))}
+                </section>
+              )}
+              {dropAlerts.length > 0 && (
+                <section className="panel snipe-card">
+                  <div className="utility-head">
+                    <p>Drop detector</p>
+                    <strong>{dropAlerts.length} live</strong>
+                  </div>
+                  {dropAlerts.slice(0, 2).map((ride) => (
+                    <button className="drop-alert-row" key={ride.id} onClick={() => openRideDetails(ride)} type="button">
+                      <strong>{ride.name}</strong>
+                      <span>{dropLabel(ride)}</span>
+                    </button>
                   ))}
                 </section>
               )}
@@ -2632,8 +2921,10 @@ export function ParkDashboard() {
                                   <div className="ride-intel">
                                     <span className={recommendationClass(prediction)}>{prediction.headline}</span>
                                     {hidden && <small>Hidden</small>}
-                                    {compactNormalLabel(ride) && <small>{compactNormalLabel(ride)}</small>}
                                     {changeLabel(ride) && <small>{changeLabel(ride)}</small>}
+                                    {signalTagsForRide(ride, 2).map((tag) => (
+                                      <small className={`ride-signal signal-${tag.tone}`} key={`${ride.id}-${tag.label}`}>{tag.label}</small>
+                                    ))}
                                   </div>
                                 </div>
                               </div>
@@ -2702,45 +2993,7 @@ export function ParkDashboard() {
                 {favorites.includes(selectedRide.id) ? "★ Favorited" : "☆ Add favorite"}
               </button>
             </section>
-
-            <div className="sheet-alert-row">
-              {alertThresholds[selectedRide.id] ? (
-                <>
-                <span><Bell size={15} /> Alert below {alertThresholds[selectedRide.id]} min</span>
-                  <button onClick={() => disableAlert(selectedRide.id)} type="button">Turn off</button>
-                </>
-              ) : (
-                <>
-                  <span><Bell size={15} /> Favorite alert</span>
-                  <button onClick={() => enableAlert(selectedRide.id)} type="button">Notify below 30 min</button>
-                </>
-              )}
-            </div>
-
-            <div className="sheet-day-actions">
-              {(["must-do", "done", "skip"] as const).map((state) => (
-                <button
-                  className={dayState[selectedRide.id] === state ? "active" : ""}
-                  key={state}
-                  onClick={() => setRideDayState(selectedRide.id, state)}
-                  type="button"
-                >
-                  {state === "must-do" ? "Must-do" : state[0].toUpperCase() + state.slice(1)}
-                </button>
-              ))}
-            </div>
-
-            <div className="sheet-day-actions">
-              <button onClick={() => addPlanItem(selectedRide, "lightning-lane")} type="button"><CalendarClock size={14} />Add LL return</button>
-              <button onClick={() => addPlanItem(selectedRide, "virtual-queue")} type="button"><Clock3 size={14} />Add VQ time</button>
-              <button
-                className={noGoRideIds.includes(selectedRide.id) ? "active" : ""}
-                onClick={() => toggleNoGoRide(selectedRide.id)}
-                type="button"
-              >
-                {noGoRideIds.includes(selectedRide.id) ? "Show" : "Hide"}
-              </button>
-            </div>
+            <SignalTags tags={signalTagsForRide(selectedRide)} />
 
             <div className="sheet-details">
               <article className="sheet-card">
@@ -2763,14 +3016,75 @@ export function ParkDashboard() {
                   <strong>{comparedWithNormalLabel(selectedRide)}</strong>
                 </article>
               )}
+              {forecastLabel(selectedRide) && (
+                <article className={`sheet-card forecast-${forecastTone(selectedRide)}`}>
+                  <span className="sheet-card-label">Next 2 hours</span>
+                  <strong>{forecastLabel(selectedRide)}</strong>
+                </article>
+              )}
+              {dropLabel(selectedRide) && (
+                <article className="sheet-card">
+                  <span className="sheet-card-label">Drop detector</span>
+                  <strong>{dropLabel(selectedRide)}</strong>
+                </article>
+              )}
             </div>
             <section className="history-card">
               <div>
                 <span>Today&apos;s wait history</span>
-                <strong>{rideHistory.length > 1 ? `${rideHistory.length} samples` : "Building"}</strong>
+                <strong>{rideHistorySummary(rideHistory, rideHistoryBaseline)}</strong>
               </div>
-              <RideHistoryChart normalWaitTime={selectedRide.normalWaitTime} points={rideHistory} />
+              <div className="chart-legend" aria-hidden="true">
+                <span><i className="legend-live" />Today</span>
+                <span><i className="legend-baseline" />Prior days</span>
+              </div>
+              <RideHistoryChart
+                baselinePoints={rideHistoryBaseline}
+                normalWaitTime={selectedRide.normalWaitTime}
+                operatingWindow={rideHistoryWindow}
+                points={rideHistory}
+              />
             </section>
+            <div className="sheet-action-zone">
+              <div className="sheet-alert-row">
+                {alertThresholds[selectedRide.id] ? (
+                  <>
+                  <span><Bell size={15} /> Alert below {alertThresholds[selectedRide.id]} min</span>
+                    <button onClick={() => disableAlert(selectedRide.id)} type="button">Turn off</button>
+                  </>
+                ) : (
+                  <>
+                    <span><Bell size={15} /> Favorite alert</span>
+                    <button onClick={() => enableAlert(selectedRide.id)} type="button">Notify below 30 min</button>
+                  </>
+                )}
+              </div>
+
+              <div className="sheet-day-actions">
+                {(["must-do", "done", "skip"] as const).map((state) => (
+                  <button
+                    className={dayState[selectedRide.id] === state ? "active" : ""}
+                    key={state}
+                    onClick={() => setRideDayState(selectedRide.id, state)}
+                    type="button"
+                  >
+                    {state === "must-do" ? "Must-do" : state[0].toUpperCase() + state.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              <div className="sheet-day-actions">
+                <button onClick={() => addPlanItem(selectedRide, "lightning-lane")} type="button"><CalendarClock size={14} />Add LL return</button>
+                <button onClick={() => addPlanItem(selectedRide, "virtual-queue")} type="button"><Clock3 size={14} />Add VQ time</button>
+                <button
+                  className={noGoRideIds.includes(selectedRide.id) ? "active" : ""}
+                  onClick={() => toggleNoGoRide(selectedRide.id)}
+                  type="button"
+                >
+                  {noGoRideIds.includes(selectedRide.id) ? "Show" : "Hide"}
+                </button>
+              </div>
+            </div>
             <section className="official-links">
               <span>Official Disney</span>
               <a href="https://disneyworld.disney.go.com/dining/" rel="noreferrer" target="_blank">Dining</a>
@@ -2784,52 +3098,120 @@ export function ParkDashboard() {
   );
 }
 
-function RideHistoryChart({ normalWaitTime, points }: { normalWaitTime: number | null; points: RideHistoryPoint[] }) {
-  const usable = points.filter((point) => point.waitTime !== null);
-  if (usable.length < 2) {
-    return <p className="muted">More samples are needed before a trend line appears.</p>;
+function minutesSinceMidnight(value: string) {
+  const date = new Date(value);
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function formatChartTime(totalMinutes: number) {
+  const minutes = ((Math.round(totalMinutes) % 1440) + 1440) % 1440;
+  const date = new Date();
+  date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  return new Intl.DateTimeFormat("en-US", { hour: "numeric" }).format(date).replace(" ", "");
+}
+
+function normalizeChartMinute(minute: number, startMinute: number, endMinute: number) {
+  if (endMinute > 1440 && minute < startMinute) return minute + 1440;
+  return minute;
+}
+
+function rideHistorySummary(points: RideHistoryPoint[], baselinePoints: RideHistoryBaselinePoint[]) {
+  const openSamples = points.filter((point) => point.waitTime !== null && point.isOpen).length;
+  if (openSamples > 1) return `${openSamples} samples`;
+  if (baselinePoints.length > 1) return `${baselinePoints.length} avg buckets`;
+  return "Building";
+}
+
+function RideHistoryChart({
+  baselinePoints,
+  normalWaitTime,
+  operatingWindow,
+  points
+}: {
+  baselinePoints: RideHistoryBaselinePoint[];
+  normalWaitTime: number | null;
+  operatingWindow: RideHistoryOperatingWindow | null;
+  points: RideHistoryPoint[];
+}) {
+  const livePoints = points
+    .filter((point) => point.waitTime !== null && point.isOpen)
+    .map((point) => ({
+      minuteOfDay: minutesSinceMidnight(point.capturedAt),
+      waitTime: point.waitTime as number
+    }));
+
+  if (livePoints.length < 2 && baselinePoints.length < 2) {
+    return <p className="muted">More open-hour samples are needed before a trend line appears.</p>;
   }
-  const waits = usable.map((point) => point.waitTime as number);
-  const maxWait = Math.max(...waits, normalWaitTime ?? 0, 1);
-  const minWait = Math.min(...waits, normalWaitTime ?? maxWait, 0);
-  const range = Math.max(1, maxWait - minWait);
-  const chartLeft = 18;
-  const chartRight = 284;
-  const chartTop = 16;
-  const chartBottom = 72;
+
+  const liveMinutes = livePoints.map((point) => point.minuteOfDay);
+  const baselineMinutes = baselinePoints.map((point) => point.minuteOfDay);
+  const openingMinute = operatingWindow ? minutesSinceMidnight(operatingWindow.openingTime) : Math.min(...liveMinutes, ...baselineMinutes);
+  const rawClosingMinute = operatingWindow ? minutesSinceMidnight(operatingWindow.closingTime) : Math.max(...liveMinutes, ...baselineMinutes);
+  const closingMinute = rawClosingMinute <= openingMinute ? rawClosingMinute + 1440 : rawClosingMinute;
+  const chartStart = Number.isFinite(openingMinute) ? openingMinute : Math.min(...liveMinutes, ...baselineMinutes);
+  const chartEnd = Number.isFinite(closingMinute) && closingMinute > chartStart ? closingMinute : Math.max(...liveMinutes, ...baselineMinutes);
+  const normalizedLive = livePoints
+    .map((point) => ({ ...point, chartMinute: normalizeChartMinute(point.minuteOfDay, chartStart, chartEnd) }))
+    .filter((point) => point.chartMinute >= chartStart && point.chartMinute <= chartEnd);
+  const normalizedBaseline = baselinePoints
+    .map((point) => ({ ...point, chartMinute: normalizeChartMinute(point.minuteOfDay, chartStart, chartEnd) }))
+    .filter((point) => point.chartMinute >= chartStart && point.chartMinute <= chartEnd);
+  const waits = [
+    ...normalizedLive.map((point) => point.waitTime),
+    ...normalizedBaseline.map((point) => point.waitTime),
+    ...(normalWaitTime === null ? [] : [normalWaitTime])
+  ];
+  const maxWait = Math.max(...waits, 1);
+  const yMax = Math.max(15, Math.ceil(maxWait / 15) * 15);
+  const chartLeft = 34;
+  const chartRight = 288;
+  const chartTop = 14;
+  const chartBottom = 92;
   const chartWidth = chartRight - chartLeft;
-  const chartY = (waitTime: number) => chartBottom - ((waitTime - minWait) / range) * (chartBottom - chartTop);
-  const polyline = usable
-    .map((point, index) => {
-      const x = chartLeft + (index / Math.max(usable.length - 1, 1)) * chartWidth;
-      const y = chartY(point.waitTime as number);
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const current = usable[usable.length - 1];
-  const currentX = chartRight;
-  const currentY = chartY(current.waitTime as number);
+  const chartHeight = chartBottom - chartTop;
+  const chartX = (minute: number) => chartLeft + ((minute - chartStart) / Math.max(1, chartEnd - chartStart)) * chartWidth;
+  const chartY = (waitTime: number) => chartBottom - (waitTime / yMax) * chartHeight;
+  const liveLine = normalizedLive.map((point) => `${chartX(point.chartMinute)},${chartY(point.waitTime)}`).join(" ");
+  const baselineLine = normalizedBaseline.map((point) => `${chartX(point.chartMinute)},${chartY(point.waitTime)}`).join(" ");
+  const current = normalizedLive[normalizedLive.length - 1];
   const normalY = normalWaitTime === null ? null : chartY(normalWaitTime);
-  const lowWait = Math.min(...waits);
-  const highWait = Math.max(...waits);
+  const waitTicks = [0, Math.round(yMax / 2), yMax];
+  const hourStep = chartEnd - chartStart > 600 ? 180 : 120;
+  const firstHourTick = Math.ceil(chartStart / 60) * 60;
+  const hourTicks = Array.from(
+    { length: Math.max(0, Math.floor((chartEnd - firstHourTick) / hourStep) + 1) },
+    (_, index) => firstHourTick + index * hourStep
+  ).filter((minute) => minute >= chartStart && minute <= chartEnd);
 
   return (
-    <svg aria-label="Ride wait history chart" className="history-chart" role="img" viewBox="0 0 300 96">
-      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={chartTop} y2={chartTop} />
-      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={(chartTop + chartBottom) / 2} y2={(chartTop + chartBottom) / 2} />
-      <line className="history-grid" x1={chartLeft} x2={chartRight} y1={chartBottom} y2={chartBottom} />
+    <svg aria-label="Ride wait history chart" className="history-chart" role="img" viewBox="0 0 300 126">
+      {waitTicks.map((tick) => {
+        const y = chartY(tick);
+        return (
+          <g key={tick}>
+            <line className="history-grid" x1={chartLeft} x2={chartRight} y1={y} y2={y} />
+            <text className="history-label history-axis-label history-label-end" x={chartLeft - 6} y={y + 3}>{tick}m</text>
+          </g>
+        );
+      })}
+      {hourTicks.map((tick) => (
+        <g key={tick}>
+          <line className="history-grid history-hour-grid" x1={chartX(tick)} x2={chartX(tick)} y1={chartTop} y2={chartBottom} />
+          <text className="history-label history-axis-label history-label-middle" x={chartX(tick)} y="112">{formatChartTime(tick)}</text>
+        </g>
+      ))}
       {normalY !== null && (
         <>
           <line className="history-normal" x1={chartLeft} x2={chartRight} y1={normalY} y2={normalY} />
           <text className="history-label history-label-end" x={chartRight} y={Math.max(12, normalY - 4)}>normal {normalWaitTime}m</text>
         </>
       )}
-      <polyline points={polyline} />
-      <circle className="history-current" cx={currentX} cy={currentY} r="4" />
-      <text className="history-label" x={chartLeft} y="90">1h ago</text>
-      <text className="history-label history-label-end" x={chartRight} y="90">now</text>
-      <text className="history-label" x={chartLeft} y="12">high {highWait}m</text>
-      <text className="history-label" x={chartLeft} y="68">low {lowWait}m</text>
+      {baselineLine && <polyline className="history-line-baseline" points={baselineLine} />}
+      {liveLine && <polyline className="history-line-live" points={liveLine} />}
+      {current && <circle className="history-current" cx={chartX(current.chartMinute)} cy={chartY(current.waitTime)} r="4" />}
+      {baselineLine && <text className="history-label" x={chartLeft} y="123">avg</text>}
+      {liveLine && <text className="history-label history-label-end" x={chartRight} y="123">today</text>}
     </svg>
   );
 }

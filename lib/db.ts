@@ -78,11 +78,16 @@ function average(values: number[]) {
   return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
 function buildCrowdPulse(
   rides: Array<{
     waitTime: number | null;
     isOpen: number | null;
     normalWaitTime: number | null;
+    trendWaitTime: number | null;
   }>
 ): CrowdPulse {
   const openWaits = rides
@@ -95,6 +100,57 @@ function buildCrowdPulse(
   const averageDelta = average(
     comparableRides.map((ride) => (ride.waitTime as number) - (ride.normalWaitTime as number))
   );
+  const trendingRides = rides
+    .filter((ride) => Boolean(ride.isOpen) && ride.waitTime !== null && ride.trendWaitTime !== null)
+    .map((ride) => (ride.waitTime as number) - (ride.trendWaitTime as number));
+  const improvingCount = trendingRides.filter((delta) => delta <= -10).length;
+  const worseningCount = trendingRides.filter((delta) => delta >= 10).length;
+  const dropCount = trendingRides.filter((delta) => delta <= -15).length;
+  const momentumAverage = average(trendingRides);
+  const momentumScore =
+    trendingRides.length < 5 || momentumAverage === null
+      ? 5
+      : clamp(Math.round(5 + momentumAverage / 5 + (worseningCount - improvingCount) / 3), 1, 10);
+  const momentum =
+    trendingRides.length < 5 || momentumAverage === null
+      ? {
+          direction: "learning" as const,
+          score: momentumScore,
+          headline: "Momentum building",
+          detail: "Need a few more trend samples to read park movement.",
+          improvingCount,
+          worseningCount,
+          dropCount
+        }
+      : momentumAverage <= -6 || improvingCount >= worseningCount + 3
+        ? {
+            direction: "easing" as const,
+            score: momentumScore,
+            headline: "Crowds easing",
+            detail: `${improvingCount} rides are dropping while ${worseningCount} are climbing.`,
+            improvingCount,
+            worseningCount,
+            dropCount
+          }
+        : momentumAverage >= 6 || worseningCount >= improvingCount + 3
+          ? {
+              direction: "building" as const,
+              score: momentumScore,
+              headline: "Crowds building",
+              detail: `${worseningCount} rides are climbing while ${improvingCount} are dropping.`,
+              improvingCount,
+              worseningCount,
+              dropCount
+            }
+          : {
+              direction: "steady" as const,
+              score: momentumScore,
+              headline: "Holding steady",
+              detail: "Most posted waits are moving within a small range.",
+              improvingCount,
+              worseningCount,
+              dropCount
+            };
 
   if (comparableRides.length >= 5 && averageDelta !== null) {
     if (averageDelta <= -10) {
@@ -104,7 +160,8 @@ function buildCrowdPulse(
         detail: `Open rides are averaging ${Math.abs(averageDelta)} min below normal right now.`,
         averageWaitTime,
         deltaFromNormal: averageDelta,
-        sampleSize: comparableRides.length
+        sampleSize: comparableRides.length,
+        momentum
       };
     }
 
@@ -115,7 +172,8 @@ function buildCrowdPulse(
         detail: `Open rides are averaging ${averageDelta} min above normal right now.`,
         averageWaitTime,
         deltaFromNormal: averageDelta,
-        sampleSize: comparableRides.length
+        sampleSize: comparableRides.length,
+        momentum
       };
     }
 
@@ -125,7 +183,8 @@ function buildCrowdPulse(
       detail: `Open rides are tracking close to their usual waits for this hour.`,
       averageWaitTime,
       deltaFromNormal: averageDelta,
-      sampleSize: comparableRides.length
+      sampleSize: comparableRides.length,
+      momentum
     };
   }
 
@@ -136,7 +195,8 @@ function buildCrowdPulse(
       detail: `Current open rides average ${averageWaitTime} min while more history accumulates.`,
       averageWaitTime,
       deltaFromNormal: null,
-      sampleSize: openWaits.length
+      sampleSize: openWaits.length,
+      momentum
     };
   }
 
@@ -146,7 +206,8 @@ function buildCrowdPulse(
     detail: "Not enough live ride data yet to read the park pulse.",
     averageWaitTime: null,
     deltaFromNormal: null,
-    sampleSize: 0
+    sampleSize: 0,
+    momentum
   };
 }
 
@@ -195,7 +256,16 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         detail: "Not enough live ride data yet to read the park pulse.",
         averageWaitTime: null,
         deltaFromNormal: null,
-        sampleSize: 0
+        sampleSize: 0,
+        momentum: {
+          direction: "learning",
+          score: 5,
+          headline: "Momentum building",
+          detail: "Need a few more trend samples to read park movement.",
+          improvingCount: 0,
+          worseningCount: 0,
+          dropCount: 0
+        }
       },
       restaurants: [],
       facilities: [],
@@ -274,6 +344,11 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
             a.longitude,
             previous.wait_time AS trendWaitTime,
             previous.is_open AS previousIsOpen,
+            CASE
+              WHEN ws.wait_time IS NOT NULL AND previous.wait_time IS NOT NULL AND previous.wait_time - ws.wait_time >= 15
+              THEN previous.wait_time - ws.wait_time
+              ELSE NULL
+            END AS dropMinutes,
             (
               SELECT ROUND(AVG(s3.wait_time))
               FROM wait_snapshots s3
@@ -283,7 +358,115 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
                 AND s3.is_open = 1
                 AND date(s3.captured_at, 'localtime') < date('now', 'localtime')
                 AND strftime('%H', s3.captured_at, 'localtime') = strftime('%H', 'now', 'localtime')
-            ) AS normalWaitTime
+            ) AS normalWaitTime,
+            (
+              SELECT ROUND(AVG(s4.wait_time))
+              FROM wait_snapshots s4
+              WHERE s4.attraction_id = a.id
+                AND s4.park_slug = ?
+                AND s4.wait_time IS NOT NULL
+                AND s4.is_open = 1
+                AND date(s4.captured_at, 'localtime') < date('now', 'localtime')
+                AND (
+                  (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) <= 1320
+                    AND (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                      BETWEEN (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      AND (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120)
+                  )
+                  OR (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) > 1320
+                    AND (
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        >= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      OR
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        <= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120 - 1440)
+                    )
+                  )
+                )
+            ) AS forecastWaitTime,
+            (
+              SELECT MIN(s4.wait_time)
+              FROM wait_snapshots s4
+              WHERE s4.attraction_id = a.id
+                AND s4.park_slug = ?
+                AND s4.wait_time IS NOT NULL
+                AND s4.is_open = 1
+                AND date(s4.captured_at, 'localtime') < date('now', 'localtime')
+                AND (
+                  (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) <= 1320
+                    AND (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                      BETWEEN (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      AND (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120)
+                  )
+                  OR (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) > 1320
+                    AND (
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        >= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      OR
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        <= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120 - 1440)
+                    )
+                  )
+                )
+            ) AS forecastLowWaitTime,
+            (
+              SELECT MAX(s4.wait_time)
+              FROM wait_snapshots s4
+              WHERE s4.attraction_id = a.id
+                AND s4.park_slug = ?
+                AND s4.wait_time IS NOT NULL
+                AND s4.is_open = 1
+                AND date(s4.captured_at, 'localtime') < date('now', 'localtime')
+                AND (
+                  (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) <= 1320
+                    AND (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                      BETWEEN (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      AND (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120)
+                  )
+                  OR (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) > 1320
+                    AND (
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        >= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      OR
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        <= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120 - 1440)
+                    )
+                  )
+                )
+            ) AS forecastHighWaitTime,
+            (
+              SELECT COUNT(*)
+              FROM wait_snapshots s4
+              WHERE s4.attraction_id = a.id
+                AND s4.park_slug = ?
+                AND s4.wait_time IS NOT NULL
+                AND s4.is_open = 1
+                AND date(s4.captured_at, 'localtime') < date('now', 'localtime')
+                AND (
+                  (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) <= 1320
+                    AND (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                      BETWEEN (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      AND (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120)
+                  )
+                  OR (
+                    (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER)) > 1320
+                    AND (
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        >= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER))
+                      OR
+                      (CAST(strftime('%H', s4.captured_at, 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', s4.captured_at, 'localtime') AS INTEGER))
+                        <= (CAST(strftime('%H', 'now', 'localtime') AS INTEGER) * 60 + CAST(strftime('%M', 'now', 'localtime') AS INTEGER) + 120 - 1440)
+                    )
+                  )
+                )
+            ) AS forecastSampleSize
           FROM attractions a
           LEFT JOIN (
             SELECT s1.*
@@ -314,7 +497,18 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
           ORDER BY areaSort, a.name
         `
       )
-      .all(park.slug, park.slug, park.slug, park.slug, ...HIDDEN_RIDE_NAMES, ...globalHiddenRideIds) as Array<{
+      .all(
+        park.slug,
+        park.slug,
+        park.slug,
+        park.slug,
+        park.slug,
+        park.slug,
+        park.slug,
+        park.slug,
+        ...HIDDEN_RIDE_NAMES,
+        ...globalHiddenRideIds
+      ) as Array<{
         id: string;
         name: string;
         areaName: string;
@@ -326,6 +520,11 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         trendWaitTime: number | null;
         previousIsOpen: number | null;
         normalWaitTime: number | null;
+        forecastWaitTime: number | null;
+        forecastLowWaitTime: number | null;
+        forecastHighWaitTime: number | null;
+        forecastSampleSize: number | null;
+        dropMinutes: number | null;
         latitude: number | null;
         longitude: number | null;
       }>;
@@ -345,6 +544,15 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         trendMinutes:
           ride.waitTime === null || ride.trendWaitTime === null ? null : ride.waitTime - ride.trendWaitTime,
         normalWaitTime: ride.normalWaitTime,
+        forecastWaitTime: ride.forecastSampleSize && ride.forecastSampleSize >= 3 ? ride.forecastWaitTime : null,
+        forecastLowWaitTime: ride.forecastSampleSize && ride.forecastSampleSize >= 3 ? ride.forecastLowWaitTime : null,
+        forecastHighWaitTime: ride.forecastSampleSize && ride.forecastSampleSize >= 3 ? ride.forecastHighWaitTime : null,
+        forecastSampleSize: ride.forecastSampleSize ?? 0,
+        forecastTrendMinutes:
+          ride.waitTime === null || !ride.forecastSampleSize || ride.forecastSampleSize < 3 || ride.forecastWaitTime === null
+            ? null
+            : ride.forecastWaitTime - ride.waitTime,
+        dropMinutes: ride.dropMinutes,
         previousIsOpen: ride.previousIsOpen === null ? null : Boolean(ride.previousIsOpen),
         latitude: ride.latitude,
         longitude: ride.longitude
@@ -422,7 +630,16 @@ export function getParkDetail(parkSlug: string): ParkDetailResponse | null {
         detail: "Not enough live ride data yet to read the park pulse.",
         averageWaitTime: null,
         deltaFromNormal: null,
-        sampleSize: 0
+        sampleSize: 0,
+        momentum: {
+          direction: "learning",
+          score: 5,
+          headline: "Momentum building",
+          detail: "Need a few more trend samples to read park movement.",
+          improvingCount: 0,
+          worseningCount: 0,
+          dropCount: 0
+        }
       },
       restaurants: [],
       facilities: [],
@@ -436,24 +653,86 @@ export function getRideHistory(rideId: string): RideHistoryResponse | null {
   if (!database) return null;
 
   const ride = database
-    .prepare("SELECT id FROM attractions WHERE id = ? AND category = 'ride'")
-    .get(rideId) as { id: string } | undefined;
+    .prepare("SELECT id, park_slug AS parkSlug FROM attractions WHERE id = ? AND category = 'ride'")
+    .get(rideId) as { id: string; parkSlug: string } | undefined;
   if (!ride) return null;
+
+  const operatingWindow = database
+    .prepare(
+      `
+        SELECT opening_time AS openingTime, closing_time AS closingTime
+        FROM park_schedules
+        WHERE park_slug = ?
+          AND schedule_date = date('now', 'localtime')
+          AND type = 'OPERATING'
+        ORDER BY opening_time
+        LIMIT 1
+      `
+    )
+    .get(ride.parkSlug) as { openingTime: string; closingTime: string } | undefined;
 
   const points = database
     .prepare(
       `
         SELECT
-          captured_at AS capturedAt,
-          wait_time AS waitTime,
-          is_open AS isOpen
-        FROM wait_snapshots
-        WHERE attraction_id = ?
-          AND datetime(captured_at) >= datetime('now', '-12 hours')
-        ORDER BY datetime(captured_at)
+          ws.captured_at AS capturedAt,
+          ws.wait_time AS waitTime,
+          ws.is_open AS isOpen
+        FROM wait_snapshots ws
+        WHERE ws.attraction_id = ?
+          AND date(ws.captured_at, 'localtime') = date('now', 'localtime')
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM park_schedules ps
+              WHERE ps.park_slug = ws.park_slug
+                AND ps.schedule_date = date(ws.captured_at, 'localtime')
+                AND ps.type = 'OPERATING'
+                AND datetime(ws.captured_at) BETWEEN datetime(ps.opening_time) AND datetime(ps.closing_time)
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM park_schedules ps
+              WHERE ps.park_slug = ws.park_slug
+                AND ps.schedule_date = date(ws.captured_at, 'localtime')
+                AND ps.type = 'OPERATING'
+            )
+          )
+        ORDER BY datetime(ws.captured_at)
       `
     )
     .all(rideId) as Array<{ capturedAt: string; waitTime: number | null; isOpen: number }>;
+
+  const baselinePoints = database
+    .prepare(
+      `
+        SELECT minuteOfDay, ROUND(AVG(waitTime)) AS waitTime, COUNT(*) AS sampleSize
+        FROM (
+          SELECT
+            CAST((
+              (
+                CAST(strftime('%H', ws.captured_at, 'localtime') AS INTEGER) * 60 +
+                CAST(strftime('%M', ws.captured_at, 'localtime') AS INTEGER)
+              ) / 30
+            ) AS INTEGER) * 30 AS minuteOfDay,
+            ws.wait_time AS waitTime
+          FROM wait_snapshots ws
+          JOIN park_schedules ps
+            ON ps.park_slug = ws.park_slug
+            AND ps.schedule_date = date(ws.captured_at, 'localtime')
+            AND ps.type = 'OPERATING'
+            AND datetime(ws.captured_at) BETWEEN datetime(ps.opening_time) AND datetime(ps.closing_time)
+          WHERE ws.attraction_id = ?
+            AND ws.wait_time IS NOT NULL
+            AND ws.is_open = 1
+            AND date(ws.captured_at, 'localtime') < date('now', 'localtime')
+        )
+        GROUP BY minuteOfDay
+        HAVING COUNT(*) >= 2
+        ORDER BY minuteOfDay
+      `
+    )
+    .all(rideId) as Array<{ minuteOfDay: number; waitTime: number; sampleSize: number }>;
 
   return {
     rideId,
@@ -461,6 +740,8 @@ export function getRideHistory(rideId: string): RideHistoryResponse | null {
       capturedAt: point.capturedAt,
       waitTime: point.waitTime,
       isOpen: Boolean(point.isOpen)
-    }))
+    })),
+    baselinePoints,
+    operatingWindow: operatingWindow ?? null
   };
 }

@@ -32,6 +32,12 @@ export type RideItem = {
   lastUpdated: string | null;
   trendMinutes: number | null;
   normalWaitTime: number | null;
+  forecastWaitTime: number | null;
+  forecastLowWaitTime: number | null;
+  forecastHighWaitTime: number | null;
+  forecastSampleSize: number;
+  forecastTrendMinutes: number | null;
+  dropMinutes: number | null;
   previousIsOpen: boolean | null;
   latitude: number | null;
   longitude: number | null;
@@ -74,6 +80,15 @@ export type CrowdPulse = {
   averageWaitTime: number | null;
   deltaFromNormal: number | null;
   sampleSize: number;
+  momentum: {
+    direction: "easing" | "building" | "steady" | "learning";
+    score: number;
+    headline: string;
+    detail: string;
+    improvingCount: number;
+    worseningCount: number;
+    dropCount: number;
+  };
 };
 
 export type RideHistoryPoint = {
@@ -82,9 +97,22 @@ export type RideHistoryPoint = {
   isOpen: boolean;
 };
 
+export type RideHistoryBaselinePoint = {
+  minuteOfDay: number;
+  waitTime: number;
+  sampleSize: number;
+};
+
+export type RideHistoryOperatingWindow = {
+  openingTime: string;
+  closingTime: string;
+};
+
 export type RideHistoryResponse = {
   rideId: string;
   points: RideHistoryPoint[];
+  baselinePoints: RideHistoryBaselinePoint[];
+  operatingWindow: RideHistoryOperatingWindow | null;
 };
 
 export type ParkDetailResponse = {
